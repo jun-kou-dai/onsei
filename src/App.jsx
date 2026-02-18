@@ -220,6 +220,21 @@ export default function EarFlow() {
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { activeIdxRef.current = activeIdx; }, [activeIdx]);
 
+  // Restart playback when edge voice changes mid-play
+  useEffect(() => {
+    if (speaking && ttsEngine === "edge" && activeIdx >= 0) {
+      const item = queue[activeIdx];
+      if (item?.text) {
+        // Stop current audio
+        playIdRef.current++;
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; audioRef.current = null; }
+        // Restart with new voice
+        edgeSpeak(item.text, rate);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edgeVoice]);
+
   useEffect(() => {
     if (status) {
       const dur = status.includes("⚠") ? 10000 : 5000;
