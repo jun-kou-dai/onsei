@@ -15,6 +15,39 @@ function computeGEC() {
   return createHash("sha256").update(input, "utf8").digest("hex").toUpperCase();
 }
 
+// Convert plain text to SSML with natural pauses and sentence structure
+function textToSSML(text) {
+  let t = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  // Split into paragraphs (double newlines)
+  const paragraphs = t.split(/\n{2,}/).filter(p => p.trim());
+
+  const ssmlParts = paragraphs.map(para => {
+    // Split paragraph into sentences at Japanese/Western sentence endings
+    const sentences = para.split(/(?<=[。！？\!\?])\s*/).filter(s => s.trim());
+
+    const sentenceSSML = sentences.map(s => {
+      // Add short pauses at Japanese commas (、) and semicolons (；)
+      let processed = s
+        .replace(/、/g, '、<break time="180ms"/>')
+        .replace(/；/g, '；<break time="200ms"/>')
+        // Pause at colon-like structures (：)
+        .replace(/：/g, '：<break time="200ms"/>')
+        // Pause at parenthetical closes
+        .replace(/[）\)」』】]/g, (m) => m + '<break time="120ms"/>')
+        // Remove standalone newlines (single line breaks within paragraph)
+        .replace(/\n/g, '<break time="100ms"/>');
+
+      return `<s>${processed}</s>`;
+    }).join('<break time="350ms"/>');
+
+    return sentenceSSML;
+  });
+
+  // Join paragraphs with longer pauses
+  return ssmlParts.join('<break time="600ms"/>');
+}
+
 // Streaming handler: pipes WebSocket audio chunks directly to HTTP response
 export default function handler(req, res) {
   if (req.method !== "POST") {
@@ -76,13 +109,13 @@ export default function handler(req, res) {
     });
     ws.send(`X-Timestamp:${new Date().toISOString()}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`);
 
-    const escaped = trimmed.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const ssmlBody = textToSSML(trimmed);
     ws.send(
       `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
       `X-Timestamp:${new Date().toISOString()}\r\nPath:ssml\r\n\r\n` +
       `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='ja-JP'>` +
       `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rateStr}' volume='+0%'>` +
-      `${escaped}</prosody></voice></speak>`
+      `${ssmlBody}</prosody></voice></speak>`
     );
   });
 
