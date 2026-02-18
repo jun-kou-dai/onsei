@@ -309,14 +309,32 @@ export default function EarFlow() {
 
       if (!res.ok) {
         const errBody = await res.text().catch(() => "");
-        let detail = "";
-        try { const parsed = JSON.parse(errBody); detail = parsed?.detail?.message || parsed?.detail || parsed?.error || ""; } catch { detail = errBody.slice(0, 150); }
-        if (res.status === 401) {
-          flash("⚠ APIキー認証失敗: " + (detail || "キーを確認してください"));
-        }
-        else if (res.status === 429) flash("⚠ レート制限に達しました。30秒ほど待ってから再試行してください");
-        else {
-          flash("⚠ ElevenLabs エラー " + res.status + (detail ? ": " + detail : ""));
+        let parsed = null;
+        try { parsed = JSON.parse(errBody); } catch {}
+        const detailObj = parsed?.detail;
+        const detailStatus = typeof detailObj === "object" ? detailObj?.status : "";
+        const detailMsg = typeof detailObj === "object" ? detailObj?.message : (typeof detailObj === "string" ? detailObj : "");
+        const fallbackMsg = parsed?.error || parsed?.message || errBody.slice(0, 150);
+
+        if (detailStatus === "quota_exceeded") {
+          // Extract remaining/required credits from message if possible
+          const credMatch = (detailMsg || "").match(/(\d[\d,]*)\s*credits?\s*remaining.*?(\d[\d,]*)\s*credits?\s*(?:are\s*)?required/i);
+          if (credMatch) {
+            flash(`⚠ 文字数上限を超えています。残り ${credMatch[1]} クレジット、このテキストには ${credMatch[2]} クレジット必要です。短いテキストで試してください`);
+          } else {
+            flash("⚠ 文字数上限を超えています。短いテキストで試すか、来月のリセットをお待ちください");
+          }
+        } else if (res.status === 401) {
+          const bodyHint = (detailMsg + " " + errBody).toLowerCase();
+          if (bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions")) {
+            flash("⚠ APIキーに音声生成の権限がありません。ElevenLabsでキーの権限設定を確認してください");
+          } else {
+            flash("⚠ APIキー認証失敗: " + (detailMsg || fallbackMsg || "キーを確認してください"));
+          }
+        } else if (res.status === 429) {
+          flash("⚠ レート制限に達しました。30秒ほど待ってから再試行してください");
+        } else {
+          flash("⚠ ElevenLabs エラー " + res.status + ": " + (detailMsg || fallbackMsg));
         }
         setSpeaking(false); return;
       }
