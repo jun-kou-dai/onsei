@@ -83,6 +83,15 @@ async function pdfToText(buf) {
   return { text: out.trim(), pages: pdf.numPages };
 }
 
+// --- localStorage helpers ---
+const lsGet = (key, fallback) => {
+  try { const v = localStorage.getItem("earflow_" + key); return v !== null ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+};
+const lsSet = (key, val) => {
+  try { localStorage.setItem("earflow_" + key, JSON.stringify(val)); } catch {}
+};
+
 // --- Unique ID ---
 let _id = 0;
 const uid = () => "i" + (++_id) + "_" + Date.now();
@@ -96,7 +105,7 @@ export default function EarFlow() {
   const [activeIdx, setActiveIdx] = useState(-1);
   const [speaking, setSpeaking] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [rate, setRate] = useState(1.0);
+  const [rate, setRateRaw] = useState(() => lsGet("rate", 1.0));
   const [progress, setProgress] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [inputTab, setInputTab] = useState("file");
@@ -106,10 +115,10 @@ export default function EarFlow() {
   const [audioTested, setAudioTested] = useState(false);
   const [audioWorks, setAudioWorks] = useState(null); // null=untested, true, false
 
-  // --- ElevenLabs state ---
-  const [ttsEngine, setTtsEngine] = useState("browser"); // "browser" | "elevenlabs"
-  const [elApiKey, setElApiKey] = useState("");
-  const [elVoiceId, setElVoiceId] = useState("Xb7hH8MSUJpSbSDYk0k2"); // "Alice" multilingual
+  // --- ElevenLabs state (persisted to localStorage) ---
+  const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "browser"));
+  const [elApiKey, setElApiKeyRaw] = useState(() => lsGet("elApiKey", ""));
+  const [elVoiceId, setElVoiceIdRaw] = useState(() => lsGet("elVoiceId", "Xb7hH8MSUJpSbSDYk0k2"));
   const [elVoices] = useState([
     { id: "Xb7hH8MSUJpSbSDYk0k2", name: "Alice（落ち着いた女性）" },
     { id: "pqHfZKP75CvOlQylNhV4", name: "Bill（落ち着いた男性）" },
@@ -129,11 +138,21 @@ export default function EarFlow() {
   const progressRef = useRef(null);
   const dragCnt = useRef(0);
 
+  // Persist-on-change wrappers
+  const setTtsEngine = (v) => { setTtsEngineRaw(v); lsSet("ttsEngine", v); };
+  const setElApiKey = (v) => { setElApiKeyRaw(v); lsSet("elApiKey", v); };
+  const setElVoiceId = (v) => { setElVoiceIdRaw(v); lsSet("elVoiceId", v); };
+  const setRate = (v) => { setRateRaw(v); lsSet("rate", v); };
+
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { activeIdxRef.current = activeIdx; }, [activeIdx]);
 
   useEffect(() => {
-    if (status) { const t = setTimeout(() => setStatus(""), 5000); return () => clearTimeout(t); }
+    if (status) {
+      const dur = status.includes("⚠") ? 10000 : 5000;
+      const t = setTimeout(() => setStatus(""), dur);
+      return () => clearTimeout(t);
+    }
   }, [status]);
 
   // Cleanup on unmount
@@ -443,9 +462,23 @@ export default function EarFlow() {
         return;
       }
 
-      // Stop everything first
-      stopAll();
+      // Stop everything first (but don't reset activeIdx yet)
+      playIdRef.current++;
+      stoppedRef.current = true;
+      chunksRef.current = [];
+      chunkIdxRef.current = 0;
+      window.speechSynthesis?.cancel();
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+        audioRef.current = null;
+      }
+      setPaused(false);
+      stopKeepAlive();
+      stopProgress();
+
       setActiveIdx(index);
+      activeIdxRef.current = index;
       setProgress(0);
 
       if (ttsEngine === "elevenlabs") {
