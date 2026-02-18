@@ -121,40 +121,68 @@ export default function EarFlow() {
       const res = await fetch("/api/el-check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey }),
+        body: JSON.stringify({ apiKey, voiceId: elVoiceId }),
       });
       const data = await res.json();
       setElChecking(false);
-      if (!data.ok) {
-        const st = data.elStatus;
-        // Parse detail message from raw body
-        let detail = "";
-        try { const parsed = JSON.parse(data.rawBody || ""); detail = parsed?.detail?.message || (typeof parsed?.detail === "string" ? parsed.detail : "") || parsed?.message || ""; } catch { detail = (data.rawBody || "").slice(0, 300); }
 
-        // "missing the permission" in body = key IS valid, just lacks specific permission
-        // ElevenLabs returns 401 (not 403) for this, so we must check body text
+      // --- Key check failed (key_ok === false) ---
+      if (!data.key_ok) {
+        const st = data.elStatus;
+        let detail = "";
+        try {
+          const parsed = JSON.parse(data.rawBody || "");
+          detail = parsed?.detail?.message || (typeof parsed?.detail === "string" ? parsed.detail : "") || parsed?.message || "";
+        } catch {
+          detail = (data.rawBody || "").slice(0, 300);
+        }
+
+        // Check body for detail.status first (401 can be detected_unusual_activity, not just invalid key)
+        let detailStatus = "";
+        try {
+          const parsed = JSON.parse(data.rawBody || "");
+          detailStatus = typeof parsed?.detail === "object" ? parsed.detail.status : "";
+        } catch {}
+
         const bodyHint = (detail + " " + (data.rawBody || "")).toLowerCase();
         const isMissingPermission = bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions");
 
         if (isMissingPermission) {
-          const info = { error: null, limited: true, tier: "unknown", used: 0, limit: 0, remaining: -1, detail };
+          const info = { error: null, key_ok: true, tts_ok: null, limited: true, tier: "unknown", used: 0, limit: 0, remaining: -1, detail };
           setElQuota(info);
           return info;
         }
-        // 401 without "missing permission" = truly invalid key
+        if (detailStatus === "detected_unusual_activity") {
+          const info = { error: "tts_blocked", key_ok: false, tts_ok: false, tts_reason: "detected_unusual_activity", detail };
+          setElQuota(info);
+          return info;
+        }
         if (st === 401) {
           setElQuota({ error: "invalid_key", detail, keyPreview: apiKey.slice(0, 6) + "..." });
           return { error: "invalid_key" };
         }
-        // Anything else
         setElQuota({ error: "api_error", elStatus: st, detail, rawBody: (data.rawBody || "").slice(0, 300) });
         return { error: "api_error" };
       }
+
+      // --- Key is valid (key_ok === true) ---
       const used = data.character_count || 0;
       const limit = data.character_limit || 0;
       const remaining = Math.max(0, limit - used);
       const tier = data.tier || "free";
-      const info = { used, limit, remaining, tier, error: null };
+
+      // Check TTS probe result
+      let tts_ok = data.tts_ok;
+      let tts_reason = "";
+      if (data.tts_ok === false) {
+        const td = data.tts_detail;
+        tts_reason = typeof td === "object" ? (td?.detail?.status || td?.detail?.message || "") : String(td || "");
+        if (typeof td === "object" && typeof td?.detail === "object") {
+          tts_reason = td.detail.status || "";
+        }
+      }
+
+      const info = { used, limit, remaining, tier, error: null, key_ok: true, tts_ok, tts_reason };
       setElQuota(info);
       return info;
     } catch (e) {
@@ -920,24 +948,39 @@ export default function EarFlow() {
                   >{elChecking ? "確認中..." : "キー確認"}</button>
                 </div>
 
-                {/* Quota display */}
+                {/* Quota display — key_ok / tts_ok separated */}
                 {elQuota && !elQuota.error && (
                   <div style={{
                     fontSize: 11, padding: "6px 8px", borderRadius: 6, marginBottom: 8,
-                    background: (elQuota.limited || elQuota.remaining > 500) ? "rgba(80,220,180,0.06)" : "rgba(232,100,100,0.08)",
-                    color: (elQuota.limited || elQuota.remaining > 500) ? "#50dcb4" : "#e08080",
+                    background: (elQuota.tts_ok === false) ? "rgba(232,180,60,0.08)"
+                      : (elQuota.limited || elQuota.remaining > 500) ? "rgba(80,220,180,0.06)" : "rgba(232,100,100,0.08)",
+                    color: (elQuota.tts_ok === false) ? "#e0b040"
+                      : (elQuota.limited || elQuota.remaining > 500) ? "#50dcb4" : "#e08080",
                     lineHeight: 1.6,
                   }}>
                     {elQuota.limited
-                      ? <>✓ キー有効 — 再生できます<br /><span style={{ color: "#888", fontSize: 10 }}>（残り文字数の確認権限がないため表示できません）</span></>
+                      ? <>✓ キー有効（アカウント照会OK）<br /><span style={{ color: "#888", fontSize: 10 }}>（残り文字数の確認権限がないため表示できません。生成可否はテスト再生で確認）</span></>
                       : <>
                         ✓ キー有効（{elQuota.tier}）
                         — 残り <b>{elQuota.remaining.toLocaleString()}</b>文字
                         （{elQuota.used.toLocaleString()} / {elQuota.limit.toLocaleString()} 使用済み）
+                        {elQuota.tts_ok === true && <><br /><span style={{ color: "#50dcb4" }}>✓ 音声生成OK</span></>}
+                        {elQuota.tts_ok === false && (
+                          elQuota.tts_reason === "detected_unusual_activity"
+                            ? <><br /><span style={{ color: "#e08080" }}>⛔ 音声生成NG — 無料枠が停止されています（クラウドIPからのアクセス制限の可能性）。有料プランにするか「ブラウザ内蔵」に切り替えてください</span></>
+                            : <><br /><span style={{ color: "#e0b040" }}>⚠ 音声生成NG — テスト再生で確認してください（{elQuota.tts_reason || "原因不明"}）</span></>
+                        )}
                         {elQuota.remaining <= 0 && <><br />⚠ 無料枠を使い切りました。来月リセットされます。</>}
                         {elQuota.remaining > 0 && elQuota.remaining <= 1000 && <><br />⚠ 残りわずかです。長い文章は「ブラウザ内蔵」推奨</>}
                       </>
                     }
+                  </div>
+                )}
+                {elQuota?.error === "tts_blocked" && (
+                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
+                    ⛔ ElevenLabs無料枠が停止されています<br />
+                    <span style={{ color: "#888" }}>クラウドIP（Vercel等）からの無料枠アクセスが制限されている可能性があります。</span><br />
+                    <span style={{ color: "#c4b5fd" }}>対処法：ElevenLabsで有料プランにアップグレードするか、「ブラウザ内蔵」に切り替えてください</span>
                   </div>
                 )}
                 {elQuota?.error === "invalid_key" && (
