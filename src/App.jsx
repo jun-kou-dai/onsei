@@ -82,7 +82,7 @@ export default function EarFlow() {
   const [audioWorks, setAudioWorks] = useState(null); // null=untested, true, false
 
   // --- ElevenLabs state (persisted to localStorage) ---
-  const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "openai"));
+  const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "edge"));
   const [elApiKey, setElApiKeyRaw] = useState(() => lsGet("elApiKey", ""));
   const [elVoiceId, setElVoiceIdRaw] = useState(() => lsGet("elVoiceId", "Xb7hH8MSUJpSbSDYk0k2"));
   const [elQuota, setElQuota] = useState(null); // { used, limit, remaining, tier }
@@ -101,7 +101,10 @@ export default function EarFlow() {
   const [oaiVoice, setOaiVoiceRaw] = useState(() => lsGet("oaiVoice", "nova"));
   const [oaiModel, setOaiModelRaw] = useState(() => lsGet("oaiModel", "tts-1"));
 
-  const audioRef = useRef(null); // HTML Audio element for ElevenLabs
+  // --- Edge TTS state ---
+  const [edgeVoice, setEdgeVoiceRaw] = useState(() => lsGet("edgeVoice", "ja-JP-NanamiNeural"));
+
+  const audioRef = useRef(null); // HTML Audio element
   const playIdRef = useRef(0); // Guard against race conditions in async TTS
 
   // Refs to avoid stale closures in callbacks
@@ -119,6 +122,7 @@ export default function EarFlow() {
   const setOaiApiKey = (v) => { setOaiApiKeyRaw(v); lsSet("oaiApiKey", v); };
   const setOaiVoice = (v) => { setOaiVoiceRaw(v); lsSet("oaiVoice", v); };
   const setOaiModel = (v) => { setOaiModelRaw(v); lsSet("oaiModel", v); };
+  const setEdgeVoice = (v) => { setEdgeVoiceRaw(v); lsSet("edgeVoice", v); };
 
   // --- ElevenLabs quota check (via server proxy to avoid CORS) ---
   const checkElQuota = async (key) => {
@@ -501,6 +505,111 @@ export default function EarFlow() {
     }
   };
 
+  // --- Edge TTS (free, no API key) ---
+  const edgeSpeak = async (text, rateVal) => {
+    const myPlayId = ++playIdRef.current;
+
+    try {
+      flash("音声生成中...");
+      setSpeaking(true);
+
+      // Edge TTS handles long text well, but chunk at 5000 chars
+      const maxChunk = 5000;
+      const chunks = [];
+      for (let i = 0; i < text.length; i += maxChunk) {
+        chunks.push(text.slice(i, i + maxChunk));
+      }
+
+      const blobs = [];
+      for (const chunk of chunks) {
+        if (playIdRef.current !== myPlayId) return;
+
+        let res;
+        try {
+          res = await fetch("/api/edge-tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: chunk,
+              voice: edgeVoice,
+              rate: rateVal ?? 1.0,
+            }),
+          });
+        } catch (fetchErr) {
+          flash("⚠ ネットワークエラー");
+          setSpeaking(false);
+          return;
+        }
+
+        if (playIdRef.current !== myPlayId) return;
+
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          flash("⚠ 音声生成エラー: " + errBody.slice(0, 100));
+          setSpeaking(false);
+          return;
+        }
+
+        blobs.push(await res.blob());
+      }
+
+      if (playIdRef.current !== myPlayId) return;
+
+      const combined = new Blob(blobs, { type: "audio/mpeg" });
+      if (combined.size < 100) {
+        flash("⚠ 音声データが空です");
+        setSpeaking(false);
+        return;
+      }
+
+      const url = URL.createObjectURL(combined);
+
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+      }
+
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.playbackRate = rateVal ?? 1.0;
+      audio.volume = 1.0;
+
+      audio.onplay = () => {
+        setSpeaking(true); setPaused(false);
+        flash("");
+      };
+
+      audio.onended = () => {
+        setSpeaking(false); setPaused(false); setProgress(100);
+        stopProgress();
+        URL.revokeObjectURL(url);
+        // Auto-play next
+        const nextIdx = activeIdxRef.current + 1;
+        const q = queueRef.current;
+        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
+          setActiveIdx(nextIdx);
+          activeIdxRef.current = nextIdx;
+          const nextText = q[nextIdx].text;
+          if (nextText) edgeSpeak(nextText, rateVal);
+        }
+      };
+
+      audio.onerror = () => {
+        setSpeaking(false); flash("⚠ 再生エラー");
+        URL.revokeObjectURL(url);
+      };
+
+      audio.ontimeupdate = () => {
+        if (audio.duration > 0) setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+      };
+
+      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+    } catch (e) {
+      flash("⚠ " + e.message);
+      setSpeaking(false);
+    }
+  };
+
   // --- Unified stop (both engines) ---
   const stopAll = () => {
     playIdRef.current++; // Cancel any pending ElevenLabs requests
@@ -683,7 +792,9 @@ export default function EarFlow() {
       activeIdxRef.current = index;
       setProgress(0);
 
-      if (ttsEngine === "openai") {
+      if (ttsEngine === "edge") {
+        edgeSpeak(fullText, rate);
+      } else if (ttsEngine === "openai") {
         openaiSpeak(fullText, rate);
       } else if (ttsEngine === "elevenlabs") {
         elSpeak(fullText, rate);
@@ -708,7 +819,7 @@ export default function EarFlow() {
   // --- PAUSE ---
   const handlePause = () => {
     try {
-      if ((ttsEngine === "elevenlabs" || ttsEngine === "openai") && audioRef.current) {
+      if (ttsEngine !== "browser" && audioRef.current) {
         audioRef.current.pause();
       } else {
         window.speechSynthesis?.pause();
@@ -721,7 +832,7 @@ export default function EarFlow() {
   // --- RESUME ---
   const handleResume = () => {
     try {
-      if ((ttsEngine === "elevenlabs" || ttsEngine === "openai") && audioRef.current) {
+      if (ttsEngine !== "browser" && audioRef.current) {
         audioRef.current.play();
       } else {
         window.speechSynthesis?.resume();
@@ -749,7 +860,7 @@ export default function EarFlow() {
     setRate(newRate);
     currentRateRef.current = newRate;
     if (speaking && activeIdx >= 0) {
-      if ((ttsEngine === "elevenlabs" || ttsEngine === "openai") && audioRef.current) {
+      if (ttsEngine !== "browser" && audioRef.current) {
         audioRef.current.playbackRate = newRate;
       } else {
         stoppedRef.current = true;
@@ -1020,7 +1131,7 @@ export default function EarFlow() {
             {/* TTS Engine */}
             <div style={{ fontSize: 12, color: "#aaa", marginBottom: 6 }}>音声エンジン</div>
             <div style={{ display: "flex", gap: 4, marginBottom: 12, flexWrap: "wrap" }}>
-              {[["openai", "OpenAI（推奨）", "#10a37f"], ["elevenlabs", "ElevenLabs", "#8b5cf6"], ["browser", "ブラウザ内蔵", "#50dcb4"]].map(([k, l, clr]) => (
+              {[["edge", "Edge（推奨・無料）", "#0078d4"], ["openai", "OpenAI", "#10a37f"], ["elevenlabs", "ElevenLabs", "#8b5cf6"], ["browser", "ブラウザ内蔵", "#50dcb4"]].map(([k, l, clr]) => (
                 <button key={k} onClick={() => { setTtsEngine(k); setAudioTested(false); setAudioWorks(null); }} style={{
                   background: ttsEngine === k ? clr : "rgba(255,255,255,0.04)",
                   color: ttsEngine === k ? "#fff" : "#666",
@@ -1029,6 +1140,37 @@ export default function EarFlow() {
                 }}>{l}</button>
               ))}
             </div>
+
+            {/* Edge TTS settings */}
+            {ttsEngine === "edge" && (
+              <div style={{ background: "rgba(0,120,212,0.05)", borderRadius: 10, padding: 12, marginBottom: 12, border: "1px solid rgba(0,120,212,0.15)" }}>
+                <div style={{ fontSize: 11, color: "#60a5fa", marginBottom: 8, fontWeight: 600 }}>Edge TTS 設定（APIキー不要）</div>
+
+                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>音声</div>
+                <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 8 }}>
+                  {[
+                    ["ja-JP-NanamiNeural", "Nanami（女性・自然）"],
+                    ["ja-JP-KeitaNeural", "Keita（男性）"],
+                    ["ja-JP-AoiNeural", "Aoi（女性・明るい）"],
+                    ["ja-JP-DaichiNeural", "Daichi（男性・落ち着き）"],
+                    ["ja-JP-MayuNeural", "Mayu（女性・やさしい）"],
+                    ["ja-JP-NaokiNeural", "Naoki（男性・ニュース）"],
+                    ["ja-JP-ShioriNeural", "Shiori（女性・丁寧）"],
+                  ].map(([id, label]) => (
+                    <button key={id} onClick={() => setEdgeVoice(id)} style={{
+                      background: edgeVoice === id ? "rgba(0,120,212,0.15)" : "transparent",
+                      color: edgeVoice === id ? "#60a5fa" : "#666",
+                      border: edgeVoice === id ? "1px solid rgba(0,120,212,0.3)" : "1px solid rgba(255,255,255,0.04)",
+                      borderRadius: 6, padding: "6px 10px", fontSize: 11, textAlign: "left",
+                    }}>{label}</button>
+                  ))}
+                </div>
+
+                <div style={{ fontSize: 10, color: "#555", lineHeight: 1.5 }}>
+                  Microsoft Edge TTSを使用。無料・APIキー不要・高品質な日本語音声。
+                </div>
+              </div>
+            )}
 
             {/* OpenAI settings */}
             {ttsEngine === "openai" && (
@@ -1200,6 +1342,11 @@ export default function EarFlow() {
             {ttsEngine === "browser" && (
               <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
                 ブラウザ内蔵の日本語音声。音質は端末に依存します。
+              </div>
+            )}
+            {ttsEngine === "edge" && (
+              <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
+                Edge TTS。高品質な日本語AI音声を無料で利用できます。
               </div>
             )}
             {ttsEngine === "openai" && (
