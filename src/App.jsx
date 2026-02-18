@@ -122,7 +122,11 @@ export default function EarFlow() {
   const [oaiModel, setOaiModelRaw] = useState(() => lsGet("oaiModel", "tts-1"));
 
   // --- Edge TTS state ---
-  const [edgeVoice, setEdgeVoiceRaw] = useState(() => lsGet("edgeVoice", "ja-JP-NanamiNeural"));
+  const VALID_EDGE_VOICES = ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"];
+  const [edgeVoice, setEdgeVoiceRaw] = useState(() => {
+    const saved = lsGet("edgeVoice", "ja-JP-NanamiNeural");
+    return VALID_EDGE_VOICES.includes(saved) ? saved : "ja-JP-NanamiNeural";
+  });
 
   const audioRef = useRef(null); // HTML Audio element
   const playIdRef = useRef(0); // Guard against race conditions in async TTS
@@ -1243,13 +1247,8 @@ export default function EarFlow() {
                 <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>音声</div>
                 <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 8 }}>
                   {[
-                    ["ja-JP-NanamiNeural", "Nanami（女性・自然）"],
+                    ["ja-JP-NanamiNeural", "Nanami（女性）"],
                     ["ja-JP-KeitaNeural", "Keita（男性）"],
-                    ["ja-JP-AoiNeural", "Aoi（女性・明るい）"],
-                    ["ja-JP-DaichiNeural", "Daichi（男性・落ち着き）"],
-                    ["ja-JP-MayuNeural", "Mayu（女性・やさしい）"],
-                    ["ja-JP-NaokiNeural", "Naoki（男性・ニュース）"],
-                    ["ja-JP-ShioriNeural", "Shiori（女性・丁寧）"],
                   ].map(([id, label]) => (
                     <button key={id} onClick={() => setEdgeVoice(id)} style={{
                       background: edgeVoice === id ? "rgba(0,120,212,0.15)" : "transparent",
