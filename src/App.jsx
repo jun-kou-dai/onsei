@@ -119,6 +119,8 @@ export default function EarFlow() {
   const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "browser"));
   const [elApiKey, setElApiKeyRaw] = useState(() => lsGet("elApiKey", ""));
   const [elVoiceId, setElVoiceIdRaw] = useState(() => lsGet("elVoiceId", "Xb7hH8MSUJpSbSDYk0k2"));
+  const [elQuota, setElQuota] = useState(null); // { used, limit, remaining, tier }
+  const [elChecking, setElChecking] = useState(false);
   const [elVoices] = useState([
     { id: "Xb7hH8MSUJpSbSDYk0k2", name: "Alice（落ち着いた女性）" },
     { id: "pqHfZKP75CvOlQylNhV4", name: "Bill（落ち着いた男性）" },
@@ -143,6 +145,51 @@ export default function EarFlow() {
   const setElApiKey = (v) => { setElApiKeyRaw(v); lsSet("elApiKey", v); };
   const setElVoiceId = (v) => { setElVoiceIdRaw(v); lsSet("elVoiceId", v); };
   const setRate = (v) => { setRateRaw(v); lsSet("rate", v); };
+
+  // --- ElevenLabs quota check ---
+  const checkElQuota = async (key) => {
+    const apiKey = key || elApiKey;
+    if (!apiKey) { setElQuota(null); return null; }
+    setElChecking(true);
+    try {
+      const res = await fetch("https://api.elevenlabs.io/v1/user/subscription", {
+        headers: { "xi-api-key": apiKey },
+      });
+      if (!res.ok) {
+        setElChecking(false);
+        if (res.status === 401) {
+          setElQuota({ error: "invalid_key" });
+          return { error: "invalid_key" };
+        }
+        setElQuota({ error: "unknown", status: res.status });
+        return { error: "unknown" };
+      }
+      const data = await res.json();
+      const used = data.character_count || 0;
+      const limit = data.character_limit || 0;
+      const remaining = Math.max(0, limit - used);
+      const tier = data.tier || "free";
+      const info = { used, limit, remaining, tier, error: null };
+      setElQuota(info);
+      setElChecking(false);
+      return info;
+    } catch {
+      setElChecking(false);
+      setElQuota({ error: "network" });
+      return { error: "network" };
+    }
+  };
+
+  // Check quota when API key changes
+  const handleElApiKeyChange = (v) => {
+    const trimmed = v.trim();
+    setElApiKey(trimmed);
+    if (trimmed.length > 10) {
+      checkElQuota(trimmed);
+    } else {
+      setElQuota(null);
+    }
+  };
 
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { activeIdxRef.current = activeIdx; }, [activeIdx]);
@@ -218,7 +265,7 @@ export default function EarFlow() {
     const myPlayId = ++playIdRef.current;
 
     try {
-      flash("🔊 音声生成中...");
+      flash("🔊 音声生成中（" + text.length + "文字）...");
       setSpeaking(true);
 
       let res;
@@ -229,7 +276,6 @@ export default function EarFlow() {
           body: JSON.stringify({
             text,
             model_id: "eleven_multilingual_v2",
-            language_code: "ja",
             voice_settings: { stability: 0.5, similarity_boost: 0.75 },
           }),
         });
@@ -242,16 +288,36 @@ export default function EarFlow() {
       if (playIdRef.current !== myPlayId) return;
 
       if (!res.ok) {
-        const err = await res.text().catch(() => "");
-        if (res.status === 401) flash("⚠ APIキーが無効です。elevenlabs.ioで確認してください");
-        else if (res.status === 429) flash("⚠ レート制限。少し待ってからもう一度試してください");
-        else if (res.status === 403) flash("⚠ アクセス拒否。APIキーの権限を確認してください");
-        else flash("⚠ ElevenLabs エラー: " + res.status);
+        const errBody = await res.text().catch(() => "");
+        if (res.status === 401) {
+          // Check quota to give more specific feedback
+          const quota = await checkElQuota();
+          if (quota?.error === "invalid_key") {
+            flash("⚠ APIキーが無効です。elevenlabs.ioでキーを再生成してください");
+          } else if (quota && !quota.error && quota.remaining <= 0) {
+            flash("⚠ 無料枠を使い切りました（" + quota.used.toLocaleString() + "/" + quota.limit.toLocaleString() + "文字）。来月にリセットされます");
+          } else {
+            flash("⚠ APIキーが無効または期限切れです。elevenlabs.ioで確認してください");
+          }
+        }
+        else if (res.status === 429) flash("⚠ レート制限に達しました。30秒ほど待ってから再試行してください");
+        else if (res.status === 403) flash("⚠ アクセス拒否。APIキーの「テキスト読み上げ」権限を確認してください");
+        else {
+          let detail = "";
+          try { const parsed = JSON.parse(errBody); detail = parsed?.detail?.message || parsed?.detail || ""; } catch {}
+          flash("⚠ ElevenLabs エラー " + res.status + (detail ? ": " + detail : ""));
+        }
         setSpeaking(false); return;
       }
 
       const blob = await res.blob();
       if (playIdRef.current !== myPlayId) return;
+
+      if (blob.size < 100) {
+        flash("⚠ 音声データが空です。テキストまたはAPIキーを確認してください");
+        setSpeaking(false); return;
+      }
+
       const url = URL.createObjectURL(blob);
 
       // Stop previous audio if any
@@ -263,6 +329,7 @@ export default function EarFlow() {
       const audio = new Audio(url);
       audioRef.current = audio;
       audio.playbackRate = rateVal || 1.0;
+      audio.volume = 1.0;
 
       audio.onplay = () => {
         setSpeaking(true); setPaused(false);
@@ -273,11 +340,14 @@ export default function EarFlow() {
         setSpeaking(false); setPaused(false); setProgress(100);
         stopProgress();
         URL.revokeObjectURL(url);
+        // Update quota after successful playback
+        checkElQuota();
         // Auto-play next
         const nextIdx = activeIdxRef.current + 1;
         const q = queueRef.current;
         if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
           setActiveIdx(nextIdx);
+          activeIdxRef.current = nextIdx;
           const nextText = q[nextIdx].mode === "raw" ? q[nextIdx].text : q[nextIdx].summary;
           if (nextText) elSpeak(nextText, rateVal);
         }
@@ -292,7 +362,7 @@ export default function EarFlow() {
         if (audio.duration > 0) setProgress(Math.round((audio.currentTime / audio.duration) * 100));
       };
 
-      audio.play().catch(e => flash("⚠ 再生失敗: " + e.message));
+      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
     } catch (e) {
       flash("⚠ " + e.message);
       setSpeaking(false);
@@ -757,9 +827,32 @@ export default function EarFlow() {
 
         {ttsEngine === "elevenlabs" && !elApiKey && (
           <div style={{ ...S.card, padding: 16, marginBottom: 16, borderColor: "rgba(232,100,100,0.2)" }}>
-            <div style={{ fontSize: 13, color: "#e08080" }}>
+            <div style={{ fontSize: 13, color: "#e08080", marginBottom: 8 }}>
               ⚠ まず⚙設定からElevenLabsのAPIキーを入力してください
             </div>
+            <button onClick={() => setShowSettings(true)} style={{
+              ...S.smBtn("rgba(139,92,246,0.15)", "#c4b5fd"),
+              border: "1px solid rgba(139,92,246,0.2)",
+            }}>⚙ 設定を開く</button>
+          </div>
+        )}
+
+        {ttsEngine === "elevenlabs" && !speaking && (status.includes("無料枠") || status.includes("期限切れ")) && (
+          <div style={{ ...S.card, padding: 16, marginBottom: 16, borderColor: "rgba(232,100,100,0.2)" }}>
+            <div style={{ fontSize: 13, color: "#e08080", marginBottom: 8, fontWeight: 600 }}>
+              ⚠ ElevenLabs 利用制限
+            </div>
+            <div style={{ fontSize: 12, color: "#999", lineHeight: 1.7, marginBottom: 10 }}>
+              無料枠（月10,000文字）を使い切った可能性があります。<br />
+              <b>対処法：</b><br />
+              ・来月のリセットを待つ<br />
+              ・ElevenLabsで有料プランにアップグレード<br />
+              ・「ブラウザ内蔵」に切り替えて使用する
+            </div>
+            <button onClick={() => { setTtsEngine("browser"); setAudioTested(false); setAudioWorks(null); flash("ブラウザ内蔵に切り替えました"); }}
+              style={{ ...S.smBtn("#50dcb4", "#111"), marginTop: 4 }}>
+              🔊 ブラウザ内蔵に切り替え
+            </button>
           </div>
         )}
 
@@ -831,18 +924,57 @@ export default function EarFlow() {
 
                 {/* API Key */}
                 <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>APIキー</div>
-                <input
-                  type="password"
-                  value={elApiKey}
-                  onChange={e => setElApiKey(e.target.value.trim())}
-                  placeholder="xi-xxxxxxxxxxxx..."
-                  style={{
-                    width: "100%", background: "#12121c", border: "1px solid rgba(255,255,255,0.08)",
-                    borderRadius: 8, color: "#ddd", padding: "8px 10px", fontSize: 12, marginBottom: 8,
-                  }}
-                />
+                <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                  <input
+                    type="password"
+                    value={elApiKey}
+                    onChange={e => handleElApiKeyChange(e.target.value)}
+                    placeholder="sk_xxxxxxxxxxxx..."
+                    style={{
+                      flex: 1, background: "#12121c", border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: 8, color: "#ddd", padding: "8px 10px", fontSize: 12,
+                    }}
+                  />
+                  <button
+                    onClick={() => checkElQuota()}
+                    disabled={!elApiKey || elChecking}
+                    style={{
+                      background: elApiKey ? "rgba(139,92,246,0.15)" : "rgba(255,255,255,0.02)",
+                      color: elApiKey ? "#c4b5fd" : "#444",
+                      border: "1px solid rgba(139,92,246,0.2)", borderRadius: 8,
+                      padding: "8px 10px", fontSize: 11, whiteSpace: "nowrap",
+                    }}
+                  >{elChecking ? "確認中..." : "キー確認"}</button>
+                </div>
+
+                {/* Quota display */}
+                {elQuota && !elQuota.error && (
+                  <div style={{
+                    fontSize: 11, padding: "6px 8px", borderRadius: 6, marginBottom: 8,
+                    background: elQuota.remaining > 500 ? "rgba(80,220,180,0.06)" : "rgba(232,100,100,0.08)",
+                    color: elQuota.remaining > 500 ? "#50dcb4" : "#e08080",
+                    lineHeight: 1.6,
+                  }}>
+                    ✓ キー有効（{elQuota.tier}）
+                    — 残り <b>{elQuota.remaining.toLocaleString()}</b>文字
+                    （{elQuota.used.toLocaleString()} / {elQuota.limit.toLocaleString()} 使用済み）
+                    {elQuota.remaining <= 0 && <><br />⚠ 無料枠を使い切りました。来月リセットされます。</>}
+                    {elQuota.remaining > 0 && elQuota.remaining <= 1000 && <><br />⚠ 残りわずかです。長い文章は「ブラウザ内蔵」推奨</>}
+                  </div>
+                )}
+                {elQuota?.error === "invalid_key" && (
+                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)" }}>
+                    ✕ APIキーが無効です。elevenlabs.ioで新しいキーを作成してください
+                  </div>
+                )}
+                {elQuota?.error === "network" && (
+                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)" }}>
+                    ✕ ネットワークエラー。接続を確認してください
+                  </div>
+                )}
+
                 <div style={{ fontSize: 10, color: "#555", marginBottom: 10, lineHeight: 1.5 }}>
-                  elevenlabs.io → Profile → API Keys で取得。無料枠: 月1万文字
+                  elevenlabs.io → Profile + API key → API Keys で取得。無料枠: 月10,000文字
                 </div>
 
                 {/* Voice */}
