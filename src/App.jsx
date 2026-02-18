@@ -91,7 +91,7 @@ export default function EarFlow() {
   const [activeIdx, setActiveIdx] = useState(-1);
   const [speaking, setSpeaking] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [rate, setRateRaw] = useState(() => lsGet("rate", 1.0));
+  const [rate, setRateRaw] = useState(() => lsGet("rate", 1.15));
   const [progress, setProgress] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [inputTab, setInputTab] = useState("file");
@@ -591,7 +591,7 @@ export default function EarFlow() {
         if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
         const audio = new Audio(url);
         audioRef.current = audio;
-        audio.playbackRate = rateVal ?? 1.0;
+        audio.playbackRate = 1.0; // Edge TTS handles rate via SSML
         audio.volume = 1.0;
         setupEdgeAudio(audio, url, rateVal);
         audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
@@ -629,7 +629,7 @@ export default function EarFlow() {
         const audio = new Audio();
         audioRef.current = audio;
         audio.src = msUrl;
-        audio.playbackRate = rateVal ?? 1.0;
+        audio.playbackRate = 1.0; // Edge TTS handles rate via SSML; don't double-apply
         audio.volume = 1.0;
         setupEdgeAudio(audio, msUrl, rateVal);
 
@@ -695,7 +695,7 @@ export default function EarFlow() {
       if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
       const audio = new Audio(url);
       audioRef.current = audio;
-      audio.playbackRate = rateVal ?? 1.0;
+      audio.playbackRate = 1.0; // Edge TTS handles rate via SSML
       audio.volume = 1.0;
       setupEdgeAudio(audio, url, rateVal);
       audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
@@ -955,8 +955,9 @@ export default function EarFlow() {
     setRate(newRate);
     currentRateRef.current = newRate;
     if (speaking && activeIdx >= 0) {
-      if (ttsEngine !== "browser" && audioRef.current) {
-        audioRef.current.playbackRate = newRate;
+      if (ttsEngine !== "browser") {
+        // Edge TTS: rate is baked into SSML; next chunk will use new rate
+        // Don't set playbackRate to avoid robotic sound
       } else {
         stoppedRef.current = true;
         window.speechSynthesis?.cancel();
@@ -1644,7 +1645,7 @@ export default function EarFlow() {
 function SpeedChips({ rate, onChange, compact }) {
   return (
     <div style={{ display: "flex", gap: compact ? 2 : 4, alignItems: "center" }}>
-      {[0.8, 1.0, 1.25, 1.5, 2.0].map(r => {
+      {[0.8, 1.0, 1.15, 1.25, 1.5, 2.0].map(r => {
         const on = Math.abs(rate - r) < 0.01;
         return (
           <button key={r} onClick={() => onChange(r)} style={{
