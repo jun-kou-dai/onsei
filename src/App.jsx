@@ -528,103 +528,152 @@ export default function EarFlow() {
   };
 
   // --- Edge TTS (free, no API key) ---
+  // Helper: set up audio event handlers and auto-play-next logic
+  const setupEdgeAudio = (audio, urlToRevoke, rateVal) => {
+    audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
+    audio.onended = () => {
+      setSpeaking(false); setPaused(false); setProgress(100); stopProgress();
+      URL.revokeObjectURL(urlToRevoke);
+      const nextIdx = activeIdxRef.current + 1;
+      const q = queueRef.current;
+      if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
+        setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
+        if (nextIdx + 1 < q.length && q[nextIdx + 1]?.status === "ready")
+          preloadEdgeAudio(q[nextIdx + 1].id, q[nextIdx + 1].text);
+        if (q[nextIdx].text) edgeSpeak(q[nextIdx].text, rateVal);
+      }
+    };
+    audio.onerror = () => { setSpeaking(false); flash("⚠ 再生エラー"); URL.revokeObjectURL(urlToRevoke); };
+    audio.ontimeupdate = () => {
+      if (audio.duration > 0 && isFinite(audio.duration))
+        setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+    };
+  };
+
   const edgeSpeak = async (text, rateVal) => {
     const myPlayId = ++playIdRef.current;
 
     try {
       setSpeaking(true);
 
-      // Check preload cache first
+      // 1. Check preload cache — instant playback
       const activeItem = queueRef.current[activeIdxRef.current];
       const cacheKey = activeItem ? `${activeItem.id}_${edgeVoice}_${rateVal ?? 1.0}` : null;
-      let combined = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
+      const cached = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
 
-      if (combined) {
+      if (cached) {
         audioCacheRef.current.delete(cacheKey);
-      } else {
-        flash("音声生成中...");
+        const url = URL.createObjectURL(cached);
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.playbackRate = rateVal ?? 1.0;
+        audio.volume = 1.0;
+        setupEdgeAudio(audio, url, rateVal);
+        audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+        return;
+      }
 
-        const maxChunk = 5000;
-        const chunks = [];
-        for (let i = 0; i < text.length; i += maxChunk) {
-          chunks.push(text.slice(i, i + maxChunk));
-        }
+      // 2. No cache — fetch with streaming playback via MediaSource
+      flash("音声生成中...");
 
-        let blobs;
+      const maxChunk = 5000;
+      const chunks = [];
+      for (let i = 0; i < text.length; i += maxChunk) chunks.push(text.slice(i, i + maxChunk));
+
+      // For single chunk + MediaSource support: stream and play immediately
+      if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
+        let fetchRes;
         try {
-          blobs = await Promise.all(chunks.map(chunk =>
-            fetch("/api/edge-tts", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ text: chunk, voice: edgeVoice, rate: rateVal ?? 1.0 }),
-            }).then(async r => {
-              if (!r.ok) throw new Error(await r.text().catch(() => ""));
-              return r.blob();
-            })
-          ));
-        } catch (fetchErr) {
-          flash("⚠ 音声生成エラー: " + String(fetchErr.message).slice(0, 100));
-          setSpeaking(false);
-          return;
+          fetchRes = await fetch("/api/edge-tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: chunks[0], voice: edgeVoice, rate: rateVal ?? 1.0 }),
+          });
+        } catch {
+          flash("⚠ ネットワークエラー"); setSpeaking(false); return;
         }
-
+        if (!fetchRes.ok) {
+          flash("⚠ 音声生成エラー: " + (await fetchRes.text().catch(() => "")).slice(0, 100));
+          setSpeaking(false); return;
+        }
         if (playIdRef.current !== myPlayId) return;
 
-        combined = new Blob(blobs, { type: "audio/mpeg" });
-        if (combined.size < 100) {
-          flash("⚠ 音声データが空です");
-          setSpeaking(false);
-          return;
-        }
+        const ms = new MediaSource();
+        const msUrl = URL.createObjectURL(ms);
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        const audio = new Audio();
+        audioRef.current = audio;
+        audio.src = msUrl;
+        audio.playbackRate = rateVal ?? 1.0;
+        audio.volume = 1.0;
+        setupEdgeAudio(audio, msUrl, rateVal);
+
+        await new Promise((resolve) => {
+          ms.addEventListener("sourceopen", async () => {
+            try {
+              const sb = ms.addSourceBuffer("audio/mpeg");
+              const reader = fetchRes.body.getReader();
+              let started = false;
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (playIdRef.current !== myPlayId) { reader.cancel(); resolve(); return; }
+                if (done) break;
+
+                if (sb.updating)
+                  await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
+                sb.appendBuffer(value);
+
+                // Start playback after first chunk appended
+                if (!started) {
+                  await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
+                  audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+                  started = true;
+                }
+              }
+
+              if (sb.updating)
+                await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
+              if (ms.readyState === "open") ms.endOfStream();
+            } catch {
+              try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
+            }
+            resolve();
+          });
+        });
+        return;
       }
 
+      // 3. Multi-chunk or no MediaSource — parallel fetch, blob playback
+      let blobs;
+      try {
+        blobs = await Promise.all(chunks.map(chunk =>
+          fetch("/api/edge-tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: chunk, voice: edgeVoice, rate: rateVal ?? 1.0 }),
+          }).then(async r => {
+            if (!r.ok) throw new Error(await r.text().catch(() => ""));
+            return r.blob();
+          })
+        ));
+      } catch (fetchErr) {
+        flash("⚠ 音声生成エラー: " + String(fetchErr.message).slice(0, 100));
+        setSpeaking(false); return;
+      }
       if (playIdRef.current !== myPlayId) return;
 
+      const combined = new Blob(blobs, { type: "audio/mpeg" });
+      if (combined.size < 100) { flash("⚠ 音声データが空です"); setSpeaking(false); return; }
+
       const url = URL.createObjectURL(combined);
-
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-      }
-
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
       const audio = new Audio(url);
       audioRef.current = audio;
       audio.playbackRate = rateVal ?? 1.0;
       audio.volume = 1.0;
-
-      audio.onplay = () => {
-        setSpeaking(true); setPaused(false);
-        flash("");
-      };
-
-      audio.onended = () => {
-        setSpeaking(false); setPaused(false); setProgress(100);
-        stopProgress();
-        URL.revokeObjectURL(url);
-        // Auto-play next
-        const nextIdx = activeIdxRef.current + 1;
-        const q = queueRef.current;
-        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
-          setActiveIdx(nextIdx);
-          activeIdxRef.current = nextIdx;
-          const nextText = q[nextIdx].text;
-          // Preload the item after next for seamless chain playback
-          if (nextIdx + 1 < q.length && q[nextIdx + 1]?.status === "ready") {
-            preloadEdgeAudio(q[nextIdx + 1].id, q[nextIdx + 1].text);
-          }
-          if (nextText) edgeSpeak(nextText, rateVal);
-        }
-      };
-
-      audio.onerror = () => {
-        setSpeaking(false); flash("⚠ 再生エラー");
-        URL.revokeObjectURL(url);
-      };
-
-      audio.ontimeupdate = () => {
-        if (audio.duration > 0) setProgress(Math.round((audio.currentTime / audio.duration) * 100));
-      };
-
+      setupEdgeAudio(audio, url, rateVal);
       audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
     } catch (e) {
       flash("⚠ " + e.message);
