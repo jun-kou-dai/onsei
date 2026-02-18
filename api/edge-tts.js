@@ -3,13 +3,15 @@ import { Buffer } from "node:buffer";
 import WebSocket from "ws";
 
 const TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-const GEC_VERSION = "1-130.0.2849.68";
+const CHROMIUM_FULL_VERSION = "143.0.3650.75";
+const GEC_VERSION = `1-${CHROMIUM_FULL_VERSION}`;
 
 // Compute Sec-MS-GEC security token (required since late 2024)
 function computeGEC() {
   // Windows FILETIME: 100-nanosecond intervals since 1601-01-01
-  const EPOCH_DIFF = 621355968000000000n; // diff between 1601 and 1970 in 100ns
-  const ticks = BigInt(Math.round(Date.now() * 10000)) + EPOCH_DIFF;
+  // 11644473600 seconds between 1601-01-01 and 1970-01-01
+  const WIN_EPOCH = 116444736000000000n; // 11644473600 * 10_000_000
+  const ticks = BigInt(Math.round(Date.now() * 10000)) + WIN_EPOCH;
   const FIVE_MIN = 3000000000n; // 5 minutes in 100ns ticks
   const rounded = ticks - (ticks % FIVE_MIN);
   const input = `${rounded}${TOKEN}`;
@@ -26,8 +28,7 @@ function edgeTTS(text, { voice = "ja-JP-NanamiNeural", rate = "+0%", pitch = "+0
       host: "speech.platform.bing.com",
       origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+        "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROMIUM_FULL_VERSION} Safari/537.36 Edg/${CHROMIUM_FULL_VERSION}`,
       },
     });
 
