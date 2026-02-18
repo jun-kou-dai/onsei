@@ -113,6 +113,7 @@ export default function EarFlow() {
   const keepAliveRef = useRef(null);
   const progressRef = useRef(null);
   const dragCnt = useRef(0);
+  const audioCacheRef = useRef(new Map()); // Preloaded audio: cacheKey → Blob
 
   // Persist-on-change wrappers
   const setTtsEngine = (v) => { setTtsEngineRaw(v); lsSet("ttsEngine", v); };
@@ -505,62 +506,79 @@ export default function EarFlow() {
     }
   };
 
+  // --- Edge TTS audio preloader (background fetch, no UI) ---
+  const preloadEdgeAudio = (itemId, text) => {
+    const key = `${itemId}_${edgeVoice}_${rate ?? 1.0}`;
+    if (audioCacheRef.current.has(key)) return;
+    const maxChunk = 5000;
+    const chunks = [];
+    for (let i = 0; i < text.length; i += maxChunk) chunks.push(text.slice(i, i + maxChunk));
+    Promise.all(chunks.map(chunk =>
+      fetch("/api/edge-tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: chunk, voice: edgeVoice, rate: rate ?? 1.0 }),
+      }).then(r => r.ok ? r.blob() : null)
+    )).then(blobs => {
+      if (blobs.every(b => b)) {
+        const combined = new Blob(blobs, { type: "audio/mpeg" });
+        if (combined.size >= 100) audioCacheRef.current.set(key, combined);
+      }
+    }).catch(() => {});
+  };
+
   // --- Edge TTS (free, no API key) ---
   const edgeSpeak = async (text, rateVal) => {
     const myPlayId = ++playIdRef.current;
 
     try {
-      flash("音声生成中...");
       setSpeaking(true);
 
-      // Edge TTS handles long text well, but chunk at 5000 chars
-      const maxChunk = 5000;
-      const chunks = [];
-      for (let i = 0; i < text.length; i += maxChunk) {
-        chunks.push(text.slice(i, i + maxChunk));
-      }
+      // Check preload cache first
+      const activeItem = queueRef.current[activeIdxRef.current];
+      const cacheKey = activeItem ? `${activeItem.id}_${edgeVoice}_${rateVal ?? 1.0}` : null;
+      let combined = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
 
-      const blobs = [];
-      for (const chunk of chunks) {
-        if (playIdRef.current !== myPlayId) return;
+      if (combined) {
+        audioCacheRef.current.delete(cacheKey);
+      } else {
+        flash("音声生成中...");
 
-        let res;
+        const maxChunk = 5000;
+        const chunks = [];
+        for (let i = 0; i < text.length; i += maxChunk) {
+          chunks.push(text.slice(i, i + maxChunk));
+        }
+
+        let blobs;
         try {
-          res = await fetch("/api/edge-tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              text: chunk,
-              voice: edgeVoice,
-              rate: rateVal ?? 1.0,
-            }),
-          });
+          blobs = await Promise.all(chunks.map(chunk =>
+            fetch("/api/edge-tts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text: chunk, voice: edgeVoice, rate: rateVal ?? 1.0 }),
+            }).then(async r => {
+              if (!r.ok) throw new Error(await r.text().catch(() => ""));
+              return r.blob();
+            })
+          ));
         } catch (fetchErr) {
-          flash("⚠ ネットワークエラー");
+          flash("⚠ 音声生成エラー: " + String(fetchErr.message).slice(0, 100));
           setSpeaking(false);
           return;
         }
 
         if (playIdRef.current !== myPlayId) return;
 
-        if (!res.ok) {
-          const errBody = await res.text().catch(() => "");
-          flash("⚠ 音声生成エラー: " + errBody.slice(0, 100));
+        combined = new Blob(blobs, { type: "audio/mpeg" });
+        if (combined.size < 100) {
+          flash("⚠ 音声データが空です");
           setSpeaking(false);
           return;
         }
-
-        blobs.push(await res.blob());
       }
 
       if (playIdRef.current !== myPlayId) return;
-
-      const combined = new Blob(blobs, { type: "audio/mpeg" });
-      if (combined.size < 100) {
-        flash("⚠ 音声データが空です");
-        setSpeaking(false);
-        return;
-      }
 
       const url = URL.createObjectURL(combined);
 
@@ -590,6 +608,10 @@ export default function EarFlow() {
           setActiveIdx(nextIdx);
           activeIdxRef.current = nextIdx;
           const nextText = q[nextIdx].text;
+          // Preload the item after next for seamless chain playback
+          if (nextIdx + 1 < q.length && q[nextIdx + 1]?.status === "ready") {
+            preloadEdgeAudio(q[nextIdx + 1].id, q[nextIdx + 1].text);
+          }
           if (nextText) edgeSpeak(nextText, rateVal);
         }
       };
@@ -884,6 +906,8 @@ export default function EarFlow() {
       status: "ready",
       charCount: text.length, pageCount: pageCount || 0,
     }]);
+    // Preload audio immediately in background (Edge TTS only - it's free)
+    if (ttsEngine === "edge") preloadEdgeAudio(id, text);
   };
 
 
