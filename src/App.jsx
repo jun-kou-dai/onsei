@@ -37,6 +37,26 @@ function loadPdf() {
   return pdfProm;
 }
 
+// Clean up text for natural TTS reading
+function cleanTextForTTS(text) {
+  let t = text;
+  // Remove page numbers (standalone digits on their own line)
+  t = t.replace(/\n\s*\d{1,4}\s*\n/g, "\n");
+  // Remove common headers/footers patterns
+  t = t.replace(/\n\s*[-–—]\s*\d+\s*[-–—]\s*\n/g, "\n");
+  // Join lines that are mid-sentence (no sentence-ending punctuation before newline)
+  // Japanese sentence endings: 。！？、）」』】
+  // Keep paragraph breaks (double newlines)
+  t = t.replace(/([^。！？\!\?\n\r」』】）\)\.])[ \t]*\n(?!\n)/g, "$1");
+  // Collapse multiple spaces/tabs into single space
+  t = t.replace(/[ \t]{2,}/g, " ");
+  // Collapse 3+ newlines into double newline (paragraph break)
+  t = t.replace(/\n{3,}/g, "\n\n");
+  // Remove leading/trailing whitespace per line
+  t = t.replace(/^[ \t]+|[ \t]+$/gm, "");
+  return t.trim();
+}
+
 async function pdfToText(buf) {
   if (!(await loadPdf())) throw new Error("PDF.js読込失敗");
   const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
@@ -946,8 +966,9 @@ export default function EarFlow() {
   /* ================================================
      QUEUE MANAGEMENT
      ================================================ */
-  const addItem = (text, title, sourceType, pageCount) => {
-    if (!text || text.trim().length < 5) { flash("⚠ テキストが短すぎます"); return; }
+  const addItem = (rawText, title, sourceType, pageCount) => {
+    if (!rawText || rawText.trim().length < 5) { flash("⚠ テキストが短すぎます"); return; }
+    const text = cleanTextForTTS(rawText);
     const id = uid();
     setQueue(q => [...q, {
       id, text, title: title || text.slice(0, 35),
