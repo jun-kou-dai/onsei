@@ -57,6 +57,43 @@ function cleanTextForTTS(text) {
   return t.trim();
 }
 
+// Smart text chunking: split at sentence boundaries, respecting maxLen
+function splitTextSmart(text, maxLen = 5000) {
+  const result = [];
+  let buf = "";
+  for (let i = 0; i < text.length; i++) {
+    buf += text[i];
+    const ch = text[i];
+    // Prefer splitting at sentence endings (。！？) or paragraph breaks
+    if ((ch === "。" || ch === "！" || ch === "？" || ch === "!" || ch === "?") && buf.length >= 100) {
+      result.push(buf.trim());
+      buf = "";
+    } else if (ch === "\n" && text[i + 1] === "\n" && buf.length >= 100) {
+      result.push(buf.trim());
+      buf = "";
+      i++; // skip the second newline
+    } else if (buf.length >= maxLen) {
+      // Hard limit reached — find best break point
+      const lastSentence = Math.max(buf.lastIndexOf("。"), buf.lastIndexOf("！"), buf.lastIndexOf("？"));
+      if (lastSentence > buf.length * 0.3) {
+        result.push(buf.slice(0, lastSentence + 1).trim());
+        buf = buf.slice(lastSentence + 1);
+      } else {
+        const lastBreak = Math.max(buf.lastIndexOf("、"), buf.lastIndexOf("，"), buf.lastIndexOf("\n"), buf.lastIndexOf(" "));
+        if (lastBreak > buf.length * 0.3) {
+          result.push(buf.slice(0, lastBreak + 1).trim());
+          buf = buf.slice(lastBreak + 1);
+        } else {
+          result.push(buf.trim());
+          buf = "";
+        }
+      }
+    }
+  }
+  if (buf.trim()) result.push(buf.trim());
+  return result.filter(c => c.length > 0);
+}
+
 async function pdfToText(buf) {
   if (!(await loadPdf())) throw new Error("PDF.js読込失敗");
   const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
@@ -439,12 +476,8 @@ export default function EarFlow() {
       flash("音声生成中...");
       setSpeaking(true);
 
-      // OpenAI TTS has 4096 char limit — chunk if needed
-      const maxChunk = 4096;
-      const chunks = [];
-      for (let i = 0; i < text.length; i += maxChunk) {
-        chunks.push(text.slice(i, i + maxChunk));
-      }
+      // OpenAI TTS has 4096 char limit — chunk at sentence boundaries
+      const chunks = splitTextSmart(text, 4096);
 
       const blobs = [];
       for (const chunk of chunks) {
@@ -555,9 +588,7 @@ export default function EarFlow() {
     const v = edgeVoiceRef.current;
     const key = `${itemId}_${v}_${rate ?? 1.0}`;
     if (audioCacheRef.current.has(key)) return;
-    const maxChunk = 5000;
-    const chunks = [];
-    for (let i = 0; i < text.length; i += maxChunk) chunks.push(text.slice(i, i + maxChunk));
+    const chunks = splitTextSmart(text, 5000);
     Promise.all(chunks.map(chunk =>
       fetch("/api/edge-tts", {
         method: "POST",
@@ -624,9 +655,7 @@ export default function EarFlow() {
       // 2. No cache — fetch with streaming playback via MediaSource
       flash("音声生成中...");
 
-      const maxChunk = 5000;
-      const chunks = [];
-      for (let i = 0; i < text.length; i += maxChunk) chunks.push(text.slice(i, i + maxChunk));
+      const chunks = splitTextSmart(text, 5000);
 
       // For single chunk + MediaSource support: stream and play immediately
       if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
