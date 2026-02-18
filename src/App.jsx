@@ -1024,9 +1024,29 @@ export default function EarFlow() {
   /* ================================================
      QUEUE MANAGEMENT
      ================================================ */
+  const SPLIT_THRESHOLD = 10000; // Auto-split texts longer than this
+
   const addItem = (rawText, title, sourceType, pageCount) => {
     if (!rawText || rawText.trim().length < 5) { flash("⚠ テキストが短すぎます"); return; }
     const text = cleanTextForTTS(rawText);
+
+    // Auto-split long texts into manageable queue items
+    if (text.length > SPLIT_THRESHOLD) {
+      const sections = splitTextSmart(text, SPLIT_THRESHOLD);
+      const baseTitle = title || text.slice(0, 25);
+      const items = sections.map((sec, i) => ({
+        id: uid(), text: sec,
+        title: `${baseTitle} (${i + 1}/${sections.length})`,
+        sourceType: sourceType || "text",
+        status: "ready",
+        charCount: sec.length, pageCount: 0,
+      }));
+      setQueue(q => [...q, ...items]);
+      if (ttsEngine === "edge" && items[0]) preloadEdgeAudio(items[0].id, items[0].text);
+      flash(`✓ ${text.length.toLocaleString()}字 → ${sections.length}パートに分割`);
+      return;
+    }
+
     const id = uid();
     setQueue(q => [...q, {
       id, text, title: title || text.slice(0, 35),
@@ -1034,7 +1054,6 @@ export default function EarFlow() {
       status: "ready",
       charCount: text.length, pageCount: pageCount || 0,
     }]);
-    // Preload audio immediately in background (Edge TTS only - it's free)
     if (ttsEngine === "edge") preloadEdgeAudio(id, text);
   };
 
