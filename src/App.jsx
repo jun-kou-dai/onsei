@@ -169,6 +169,12 @@ export default function EarFlow() {
         setElQuota({ error: "unknown", status: data.status, detail });
         return { error: "unknown" };
       }
+      if (data.limited) {
+        // Key is valid but lacks user_read permission — can't get quota
+        const info = { used: 0, limit: 0, remaining: -1, tier: data.tier || "unknown", error: null, limited: true };
+        setElQuota(info);
+        return info;
+      }
       const used = data.character_count || 0;
       const limit = data.character_limit || 0;
       const remaining = Math.max(0, limit - used);
@@ -947,15 +953,20 @@ export default function EarFlow() {
                 {elQuota && !elQuota.error && (
                   <div style={{
                     fontSize: 11, padding: "6px 8px", borderRadius: 6, marginBottom: 8,
-                    background: elQuota.remaining > 500 ? "rgba(80,220,180,0.06)" : "rgba(232,100,100,0.08)",
-                    color: elQuota.remaining > 500 ? "#50dcb4" : "#e08080",
+                    background: (elQuota.limited || elQuota.remaining > 500) ? "rgba(80,220,180,0.06)" : "rgba(232,100,100,0.08)",
+                    color: (elQuota.limited || elQuota.remaining > 500) ? "#50dcb4" : "#e08080",
                     lineHeight: 1.6,
                   }}>
-                    ✓ キー有効（{elQuota.tier}）
-                    — 残り <b>{elQuota.remaining.toLocaleString()}</b>文字
-                    （{elQuota.used.toLocaleString()} / {elQuota.limit.toLocaleString()} 使用済み）
-                    {elQuota.remaining <= 0 && <><br />⚠ 無料枠を使い切りました。来月リセットされます。</>}
-                    {elQuota.remaining > 0 && elQuota.remaining <= 1000 && <><br />⚠ 残りわずかです。長い文章は「ブラウザ内蔵」推奨</>}
+                    {elQuota.limited
+                      ? <>✓ キー有効 — 再生できます<br /><span style={{ color: "#888", fontSize: 10 }}>（残り文字数の確認権限がないため表示できません）</span></>
+                      : <>
+                        ✓ キー有効（{elQuota.tier}）
+                        — 残り <b>{elQuota.remaining.toLocaleString()}</b>文字
+                        （{elQuota.used.toLocaleString()} / {elQuota.limit.toLocaleString()} 使用済み）
+                        {elQuota.remaining <= 0 && <><br />⚠ 無料枠を使い切りました。来月リセットされます。</>}
+                        {elQuota.remaining > 0 && elQuota.remaining <= 1000 && <><br />⚠ 残りわずかです。長い文章は「ブラウザ内蔵」推奨</>}
+                      </>
+                    }
                   </div>
                 )}
                 {elQuota?.error === "invalid_key" && (
