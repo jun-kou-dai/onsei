@@ -209,6 +209,11 @@ export default function EarFlow() {
   const sentenceOffsetsRef = useRef([]); // cumulative char offsets
   const highlightIdxRef = useRef(-1);
 
+  // --- Session resume state ---
+  const [savedSession, setSavedSession] = useState(null);
+  const pendingResumeRef = useRef(null);
+  const seekAfterLoadRef = useRef(0);
+
   // --- ElevenLabs state (persisted to localStorage) ---
   const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "edge"));
   const [elApiKey, setElApiKeyRaw] = useState(() => lsGet("elApiKey", ""));
@@ -374,8 +379,125 @@ export default function EarFlow() {
     };
   }, []);
 
+  // --- Session restore on mount ---
+  useEffect(() => {
+    const s = lsGet("session", null);
+    if (s && Array.isArray(s.queue) && s.queue.length > 0) {
+      // Validate each queue item has required fields
+      const valid = s.queue.every(item =>
+        item && typeof item.id === "string" && typeof item.text === "string" && item.text.length > 0 && typeof item.status === "string"
+      );
+      if (valid) {
+        const clampedIdx = typeof s.activeIdx === "number"
+          ? Math.min(Math.max(s.activeIdx, -1), s.queue.length - 1)
+          : -1;
+        setSavedSession({
+          queue: s.queue,
+          activeIdx: clampedIdx,
+          progress: typeof s.progress === "number" ? Math.min(Math.max(s.progress, 0), 100) : 0,
+          savedAt: s.savedAt || Date.now(),
+        });
+      } else {
+        lsSet("session", null);
+      }
+    }
+  }, []);
+
+  // Pending resume: trigger playback after queue is restored
+  useEffect(() => {
+    if (pendingResumeRef.current && queue.length > 0) {
+      const { idx, progress: prog } = pendingResumeRef.current;
+      if (idx >= 0 && idx < queue.length && queue[idx]?.status === "ready") {
+        seekAfterLoadRef.current = prog || 0;
+        // Use queueRef to avoid stale closure in setTimeout
+        const qRef = queueRef.current;
+        setTimeout(() => {
+          pendingResumeRef.current = null;
+          if (idx < qRef.length && qRef[idx]?.status === "ready") {
+            handlePlay(idx);
+          }
+        }, 80);
+      } else {
+        // idx out of range or item not ready - just restore queue without playing
+        pendingResumeRef.current = null;
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue]);
+
+  // Dismiss resume banner if user adds items manually
+  useEffect(() => {
+    if (savedSession && queue.length > 0 && !pendingResumeRef.current) {
+      setSavedSession(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue.length]);
+
+  // Auto-save queue changes
+  useEffect(() => {
+    if (pendingResumeRef.current) return; // Skip during resume flow
+    if (queue.length > 0) {
+      // Preserve current progress if actively playing (avoid resetting to 0)
+      saveSessionData(queue, activeIdxRef.current, getCurrentProgress());
+    } else if (!savedSession) {
+      lsSet("session", null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue]);
+
+  // Periodic progress save during playback (every 5s)
+  useEffect(() => {
+    if (!speaking) return;
+    const interval = setInterval(() => {
+      saveSessionData(queueRef.current, activeIdxRef.current, getCurrentProgress());
+    }, 5000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speaking]);
+
+  // Save on page unload
+  useEffect(() => {
+    const onUnload = () => {
+      saveSessionData(queueRef.current, activeIdxRef.current, getCurrentProgress());
+    };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, []);
+
   const flash = (msg) => setStatus(msg);
   const upd = (id, u) => setQueue(q => q.map(x => x.id === id ? { ...x, ...u } : x));
+
+  // --- Session save/restore ---
+  const saveSessionData = (q, idx, prog) => {
+    if (!q || q.length === 0) {
+      lsSet("session", null);
+      return;
+    }
+    lsSet("session", {
+      queue: q.map(item => ({
+        id: item.id, text: item.text, title: item.title,
+        sourceType: item.sourceType, status: item.status,
+        charCount: item.charCount, pageCount: item.pageCount || 0,
+      })),
+      activeIdx: idx,
+      progress: prog || 0,
+      savedAt: Date.now(),
+    });
+  };
+
+  const handleResumeSession = () => {
+    const s = savedSession;
+    if (!s) return;
+    pendingResumeRef.current = { idx: s.activeIdx >= 0 ? s.activeIdx : -1, progress: s.progress || 0 };
+    setQueue(s.queue);
+    queueRef.current = s.queue;
+    setSavedSession(null);
+  };
+
+  const handleDismissSession = () => {
+    setSavedSession(null);
+    lsSet("session", null);
+  };
 
   // --- Highlight helpers ---
   const setupSentences = (text) => {
@@ -565,6 +687,13 @@ export default function EarFlow() {
       audio.onplay = () => {
         setSpeaking(true); setPaused(false);
         flash(""); // clear "generating" message
+        if (seekAfterLoadRef.current > 0) {
+          const target = seekAfterLoadRef.current;
+          seekAfterLoadRef.current = 0;
+          const doSeek = () => { if (audio.duration > 0 && isFinite(audio.duration)) audio.currentTime = (target / 100) * audio.duration; };
+          if (audio.duration > 0 && isFinite(audio.duration)) doSeek();
+          else audio.addEventListener("durationchange", doSeek, { once: true });
+        }
       };
 
       audio.onended = () => {
@@ -691,6 +820,13 @@ export default function EarFlow() {
       audio.onplay = () => {
         setSpeaking(true); setPaused(false);
         flash("");
+        if (seekAfterLoadRef.current > 0) {
+          const target = seekAfterLoadRef.current;
+          seekAfterLoadRef.current = 0;
+          const doSeek = () => { if (audio.duration > 0 && isFinite(audio.duration)) audio.currentTime = (target / 100) * audio.duration; };
+          if (audio.duration > 0 && isFinite(audio.duration)) doSeek();
+          else audio.addEventListener("durationchange", doSeek, { once: true });
+        }
       };
 
       audio.onended = () => {
@@ -755,7 +891,16 @@ export default function EarFlow() {
   // --- Edge TTS (free, no API key) ---
   // Helper: set up audio event handlers and auto-play-next logic
   const setupEdgeAudio = (audio, urlToRevoke, rateVal) => {
-    audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
+    audio.onplay = () => {
+      setSpeaking(true); setPaused(false); flash("");
+      if (seekAfterLoadRef.current > 0) {
+        const target = seekAfterLoadRef.current;
+        seekAfterLoadRef.current = 0;
+        const doSeek = () => { if (audio.duration > 0 && isFinite(audio.duration)) audio.currentTime = (target / 100) * audio.duration; };
+        if (audio.duration > 0 && isFinite(audio.duration)) doSeek();
+        else audio.addEventListener("durationchange", doSeek, { once: true });
+      }
+    };
     audio.onended = () => {
       setSpeaking(false); setPaused(false); setProgress(100); stopProgress();
       URL.revokeObjectURL(urlToRevoke);
@@ -911,9 +1056,27 @@ export default function EarFlow() {
     }
   };
 
+  // Get current playback progress (0-100) for any engine
+  const getCurrentProgress = () => {
+    if (audioRef.current?.duration > 0 && isFinite(audioRef.current.duration)) {
+      return Math.round((audioRef.current.currentTime / audioRef.current.duration) * 100);
+    }
+    if (totalCharsRef.current > 0 && spokenCharsRef.current > 0) {
+      return Math.round((spokenCharsRef.current / totalCharsRef.current) * 100);
+    }
+    return 0;
+  };
+
   // --- Unified stop (both engines) ---
   const stopAll = () => {
+    // Save position before stopping
+    const prog = getCurrentProgress();
+    if (queueRef.current.length > 0) {
+      saveSessionData(queueRef.current, activeIdxRef.current, prog);
+    }
+
     playIdRef.current++; // Cancel any pending ElevenLabs requests
+    seekAfterLoadRef.current = 0;
 
     // Browser TTS
     stoppedRef.current = true;
@@ -1080,7 +1243,8 @@ export default function EarFlow() {
   // --- PLAY ITEM ---
   const handlePlay = (index) => {
     try {
-      const item = queue[index];
+      // Use ref to avoid stale closure when called from setTimeout
+      const item = queueRef.current[index];
       if (!item || item.status !== "ready") return;
       const fullText = item.text;
       if (!fullText || fullText.length === 0) {
@@ -1124,7 +1288,23 @@ export default function EarFlow() {
           totalCharsRef.current = fullText.length;
           spokenCharsRef.current = 0;
           currentRateRef.current = rate;
-          speakChunk(0, rate);
+          // Handle seek for browser TTS resume
+          if (seekAfterLoadRef.current > 0) {
+            const totalChunkChars = chunks.reduce((sum, c) => sum + c.length, 0);
+            const targetChars = Math.floor((seekAfterLoadRef.current / 100) * totalChunkChars);
+            seekAfterLoadRef.current = 0;
+            let cumChars = 0;
+            let startChunk = 0;
+            for (let i = 0; i < chunks.length; i++) {
+              if (cumChars + chunks[i].length >= targetChars) { startChunk = i; break; }
+              cumChars += chunks[i].length;
+              if (i === chunks.length - 1) startChunk = i; // last chunk fallback
+            }
+            spokenCharsRef.current = cumChars;
+            speakChunk(startChunk, rate);
+          } else {
+            speakChunk(0, rate);
+          }
         }, 100);
       }
     } catch (e) {
@@ -1830,7 +2010,7 @@ export default function EarFlow() {
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <span style={{ fontSize: 12, color: "#666" }}>キュー {queue.length}件</span>
-              <button onClick={() => { handleStop(); setQueue([]); }} style={S.smBtn("transparent", "#555")}>クリア</button>
+              <button onClick={() => { handleStop(); setQueue([]); lsSet("session", null); }} style={S.smBtn("transparent", "#555")}>クリア</button>
             </div>
 
             {queue.map((item, i) => {
@@ -1882,7 +2062,50 @@ export default function EarFlow() {
           </div>
         )}
 
-        {queue.length === 0 && (
+        {/* ========== RESUME BANNER ========== */}
+        {savedSession && queue.length === 0 && (
+          <div style={{
+            ...S.card, padding: "16px 16px", marginBottom: 16,
+            borderColor: "rgba(80,220,180,0.2)",
+            background: "rgba(80,220,180,0.03)",
+          }}>
+            <div style={{ fontSize: 13, color: "#50dcb4", fontWeight: 600, marginBottom: 8 }}>
+              前回の続きがあります
+            </div>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
+              {savedSession.queue.length}件のキュー
+              {savedSession.activeIdx >= 0 && savedSession.queue[savedSession.activeIdx] && (
+                <> · 「{savedSession.queue[savedSession.activeIdx].title.slice(0, 25)}」
+                  {savedSession.progress > 0 && <> ({savedSession.progress}%)</>}
+                </>
+              )}
+            </div>
+            <div style={{ fontSize: 10, color: "#555", marginBottom: 10 }}>
+              {(() => {
+                const diff = Date.now() - (savedSession.savedAt || 0);
+                const mins = Math.floor(diff / 60000);
+                if (mins < 1) return "たった今";
+                if (mins < 60) return `${mins}分前`;
+                const hours = Math.floor(mins / 60);
+                if (hours < 24) return `${hours}時間前`;
+                return `${Math.floor(hours / 24)}日前`;
+              })()}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={handleResumeSession} style={{
+                ...S.btn("#50dcb4", "#111"), padding: "10px 20px", fontSize: 13,
+              }}>
+                {savedSession.activeIdx >= 0 && savedSession.progress > 0 ? "続きから再生" : "キューを復元"}
+              </button>
+              <button onClick={handleDismissSession} style={{
+                ...S.smBtn("transparent", "#555"),
+                border: "1px solid rgba(255,255,255,0.06)",
+              }}>破棄</button>
+            </div>
+          </div>
+        )}
+
+        {queue.length === 0 && !savedSession && (
           <div style={{ textAlign: "center", padding: "36px 16px" }}>
             <div style={{ fontSize: 32, opacity: 0.15, marginBottom: 8 }}>📻</div>
             <div style={{ fontSize: 13, color: "#444" }}>PDFをドロップ or テキスト貼り付け or デモ追加</div>
