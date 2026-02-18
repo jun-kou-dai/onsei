@@ -189,7 +189,18 @@ export default function EarFlow() {
   const keepAliveRef = useRef(null);
   const progressRef = useRef(null);
   const dragCnt = useRef(0);
-  const audioCacheRef = useRef(new Map()); // Preloaded audio: cacheKey → Blob
+  const audioCacheRef = useRef(new Map()); // Preloaded audio: cacheKey → Blob (LRU, max 3)
+  const CACHE_MAX = 3;
+  const cacheSet = (key, blob) => {
+    const cache = audioCacheRef.current;
+    cache.delete(key); // move to end (most recent)
+    cache.set(key, blob);
+    // Evict oldest entries
+    while (cache.size > CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+    }
+  };
 
   // Persist-on-change wrappers
   const setTtsEngine = (v) => { setTtsEngineRaw(v); lsSet("ttsEngine", v); };
@@ -614,7 +625,7 @@ export default function EarFlow() {
       const valid = blobs.filter(b => b);
       if (valid.length > 0) {
         const combined = new Blob(valid, { type: "audio/mpeg" });
-        if (combined.size >= 100) audioCacheRef.current.set(key, combined);
+        if (combined.size >= 100) cacheSet(key, combined);
       }
     }).catch(() => {});
   };
