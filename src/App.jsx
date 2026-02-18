@@ -1086,6 +1086,10 @@ export default function EarFlow() {
   const processFile = async (file) => {
     try {
       if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        if (file.size > 50 * 1024 * 1024) {
+          flash("⚠ PDFが大きすぎます（50MB上限）。短いファイルをお試しください");
+          return;
+        }
         flash("📄 PDF読み込み中...");
         const buf = await readBuf(file);
         const { text, pages } = await pdfToText(buf);
@@ -1588,6 +1592,12 @@ export default function EarFlow() {
                   color: "#ddd", padding: 14, fontSize: 13, lineHeight: 1.7, resize: "vertical",
                 }}
               />
+              {inputText.length > 0 && (
+                <div style={{ fontSize: 10, color: inputText.length > SPLIT_THRESHOLD ? "#f0a040" : "#555", textAlign: "right", marginTop: 2 }}>
+                  {inputText.length.toLocaleString()}字
+                  {inputText.length > SPLIT_THRESHOLD && ` → ${Math.ceil(inputText.length / SPLIT_THRESHOLD)}パートに自動分割`}
+                </div>
+              )}
               <button onClick={addTextInput} disabled={!inputText.trim()}
                 style={{ ...S.btn(inputText.trim() ? "#50dcb4" : "#1c1c28", inputText.trim() ? "#111" : "#444"), width: "100%", marginTop: 8 }}>
                 🎙 キューに追加
