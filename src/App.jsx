@@ -72,18 +72,46 @@ async function fetchWithRetry(url, options, retries = 2) {
   }
 }
 
-// Smart text chunking: split at sentence boundaries, respecting maxLen
+// Split long text into sections for queue items (paragraph-aware, targets ~maxLen chars)
+function splitIntoSections(text, maxLen = 10000) {
+  // First try splitting by paragraphs
+  const paragraphs = text.split(/\n\n+/);
+  const sections = [];
+  let buf = "";
+  for (const p of paragraphs) {
+    if (buf && (buf.length + p.length + 2) > maxLen) {
+      sections.push(buf.trim());
+      buf = p;
+    } else {
+      buf += (buf ? "\n\n" : "") + p;
+    }
+  }
+  if (buf.trim()) sections.push(buf.trim());
+  // If any section is still too long, split at sentence boundaries
+  const result = [];
+  for (const sec of sections) {
+    if (sec.length <= maxLen * 1.2) {
+      result.push(sec);
+    } else {
+      result.push(...splitTextSmart(sec, maxLen));
+    }
+  }
+  return result.filter(s => s.length > 0);
+}
+
+// Smart text chunking: split at sentence boundaries, respecting maxLen (for TTS API)
 function splitTextSmart(text, maxLen = 5000) {
+  const minLen = Math.max(100, Math.floor(maxLen * 0.5)); // Don't split too eagerly
   const result = [];
   let buf = "";
   for (let i = 0; i < text.length; i++) {
     buf += text[i];
     const ch = text[i];
     // Prefer splitting at sentence endings (。！？) or paragraph breaks
-    if ((ch === "。" || ch === "！" || ch === "？" || ch === "!" || ch === "?") && buf.length >= 100) {
+    if ((ch === "。" || ch === "！" || ch === "？" || ch === "!" || ch === "?") && buf.length >= minLen) {
       result.push(buf.trim());
       buf = "";
-    } else if (ch === "\n" && text[i + 1] === "\n" && buf.length >= 100) {
+    } else if (ch === "\n" && text[i + 1] === "\n" && buf.length >= minLen) {
       result.push(buf.trim());
       buf = "";
       i++; // skip the second newline
@@ -1058,7 +1086,7 @@ export default function EarFlow() {
 
     // Auto-split long texts into manageable queue items
     if (text.length > SPLIT_THRESHOLD) {
-      const sections = splitTextSmart(text, SPLIT_THRESHOLD);
+      const sections = splitIntoSections(text, SPLIT_THRESHOLD);
       const baseTitle = title || text.slice(0, 25);
       const items = sections.map((sec, i) => ({
         id: uid(), text: sec,
