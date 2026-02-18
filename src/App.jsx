@@ -320,6 +320,12 @@ export default function EarFlow() {
           }
         } else if (detailStatus === "detected_unusual_activity") {
           flash("⚠ ElevenLabs無料枠が停止されています（クラウドIPからのアクセス制限）。有料プランにするか、「ブラウザ内蔵」に切り替えてください");
+          // 設定画面のステータスを即座に「停止中」に上書き
+          setElQuota({
+            error: "ban",
+            detail: "Unusual activity detected. Free Tier usage disabled via API.",
+            tier: "free_banned",
+          });
         } else if (res.status === 401) {
           const bodyHint = (detailMsg + " " + errBody).toLowerCase();
           if (bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions")) {
@@ -353,7 +359,7 @@ export default function EarFlow() {
 
       const audio = new Audio(url);
       audioRef.current = audio;
-      audio.playbackRate = rateVal || 1.0;
+      audio.playbackRate = rateVal ?? 1.0;
       audio.volume = 1.0;
 
       audio.onplay = () => {
@@ -976,7 +982,7 @@ export default function EarFlow() {
                     }
                   </div>
                 )}
-                {elQuota?.error === "tts_blocked" && (
+                {(elQuota?.error === "tts_blocked" || elQuota?.error === "ban") && (
                   <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
                     ⛔ ElevenLabs無料枠が停止されています<br />
                     <span style={{ color: "#888" }}>クラウドIP（Vercel等）からの無料枠アクセスが制限されている可能性があります。</span><br />
