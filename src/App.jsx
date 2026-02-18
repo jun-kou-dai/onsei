@@ -176,6 +176,8 @@ export default function EarFlow() {
   const [showSettings, setShowSettings] = useState(false);
   const [inputTab, setInputTab] = useState("file");
   const [inputText, setInputText] = useState("");
+  const [inputUrl, setInputUrl] = useState("");
+  const [urlLoading, setUrlLoading] = useState(false);
   const [status, setStatus] = useState("");
   const [isDrag, setIsDrag] = useState(false);
   const [audioTested, setAudioTested] = useState(false);
@@ -1168,6 +1170,32 @@ export default function EarFlow() {
     setInputText("");
   };
 
+  const addFromUrl = async () => {
+    const url = inputUrl.trim();
+    if (!url) return;
+    setUrlLoading(true);
+    flash("🌐 記事を取得中...");
+    try {
+      const res = await fetch("/api/extract-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        flash("⚠ " + (data.error || "記事の取得に失敗しました"));
+        setUrlLoading(false);
+        return;
+      }
+      addItem(data.text, data.title || data.source, "url", 0);
+      flash(`✓ ${data.source} から ${data.charCount.toLocaleString()}字を取得`);
+      setInputUrl("");
+    } catch (e) {
+      flash("⚠ ネットワークエラー: " + e.message);
+    }
+    setUrlLoading(false);
+  };
+
   const addDemos = () => {
     addItem(
       "日本銀行は本日の金融政策決定会合で、短期金利の誘導目標を0.5%に据え置くことを全員一致で決定しました。植田和男総裁は記者会見で、賃金と物価の好循環が確認されつつあるとしながらも、米国の関税政策による不確実性が高まっていることを指摘。追加利上げの時期についてはデータ次第と繰り返しました。市場では年内の追加利上げ観測がやや後退し、ドル円は一時149円台後半まで円安が進行しています。",
@@ -1590,7 +1618,7 @@ export default function EarFlow() {
         <div style={{ marginBottom: 20 }}>
           {/* Tabs */}
           <div style={{ display: "flex", gap: 2, marginBottom: 8, background: "#141420", borderRadius: 8, padding: 3, width: "fit-content" }}>
-            {[["file", "📄 ファイル"], ["text", "✏️ テキスト"]].map(([k, l]) => (
+            {[["file", "📄 ファイル"], ["text", "✏️ テキスト"], ["url", "🌐 URL"]].map(([k, l]) => (
               <button key={k} onClick={() => setInputTab(k)} style={{
                 background: inputTab === k ? "#222234" : "transparent",
                 color: inputTab === k ? "#50dcb4" : "#555",
@@ -1600,7 +1628,7 @@ export default function EarFlow() {
             ))}
           </div>
 
-          {inputTab === "file" ? (
+          {inputTab === "file" && (
             <div>
               <input
                 id="earflow-file-input"
@@ -1621,7 +1649,8 @@ export default function EarFlow() {
                 <div style={{ fontSize: 10, color: "#444", marginTop: 4 }}>PDF, TXT, MD, CSV, HTML</div>
               </label>
             </div>
-          ) : (
+          )}
+          {inputTab === "text" && (
             <>
               <textarea value={inputText} onChange={e => setInputText(e.target.value)}
                 placeholder="読みたいテキストをペースト..."
@@ -1641,6 +1670,35 @@ export default function EarFlow() {
                 style={{ ...S.btn(inputText.trim() ? "#50dcb4" : "#1c1c28", inputText.trim() ? "#111" : "#444"), width: "100%", marginTop: 8 }}>
                 🎙 キューに追加
               </button>
+            </>
+          )}
+          {inputTab === "url" && (
+            <>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  type="url"
+                  value={inputUrl}
+                  onChange={e => setInputUrl(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && inputUrl.trim() && !urlLoading) addFromUrl(); }}
+                  placeholder="https://example.com/article..."
+                  style={{
+                    flex: 1, background: "#12121c",
+                    border: "1px solid rgba(255,255,255,0.06)", borderRadius: 10,
+                    color: "#ddd", padding: "10px 14px", fontSize: 13,
+                  }}
+                />
+                <button
+                  onClick={addFromUrl}
+                  disabled={!inputUrl.trim() || urlLoading}
+                  style={{
+                    ...S.btn(inputUrl.trim() && !urlLoading ? "#50dcb4" : "#1c1c28", inputUrl.trim() && !urlLoading ? "#111" : "#444"),
+                    padding: "10px 16px", whiteSpace: "nowrap", flexShrink: 0,
+                  }}
+                >{urlLoading ? "取得中..." : "🌐 取得"}</button>
+              </div>
+              <div style={{ fontSize: 10, color: "#555", marginTop: 6, lineHeight: 1.5 }}>
+                ニュース記事やブログのURLを入力。本文を自動抽出してキューに追加します。
+              </div>
             </>
           )}
 
