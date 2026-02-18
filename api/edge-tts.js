@@ -15,16 +15,9 @@ function computeGEC() {
   return createHash("sha256").update(input, "utf8").digest("hex").toUpperCase();
 }
 
-// Convert plain text to SSML with natural pauses (break tags only, no nesting)
-function textToSSML(text) {
-  let t = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  // Paragraph breaks → long pause
-  t = t.replace(/\n{2,}/g, ' <break time="500ms"/> ');
-  // Sentence endings → medium pause
-  t = t.replace(/([。！？])(?!\s*$)/g, '$1 <break time="300ms"/> ');
-  // Single newlines → short pause
-  t = t.replace(/\n/g, ' <break time="120ms"/> ');
-  return t.trim();
+// Escape text for embedding in SSML (XML entity escaping only)
+function escapeSSML(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // Streaming handler: pipes WebSocket audio chunks directly to HTTP response
@@ -88,7 +81,7 @@ export default function handler(req, res) {
     });
     ws.send(`X-Timestamp:${new Date().toISOString()}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`);
 
-    const ssmlBody = textToSSML(trimmed);
+    const ssmlBody = escapeSSML(trimmed);
     ws.send(
       `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
       `X-Timestamp:${new Date().toISOString()}\r\nPath:ssml\r\n\r\n` +
