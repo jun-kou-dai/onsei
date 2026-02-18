@@ -15,37 +15,16 @@ function computeGEC() {
   return createHash("sha256").update(input, "utf8").digest("hex").toUpperCase();
 }
 
-// Convert plain text to SSML with natural pauses and sentence structure
+// Convert plain text to SSML with natural pauses (break tags only, no nesting)
 function textToSSML(text) {
   let t = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-  // Split into paragraphs (double newlines)
-  const paragraphs = t.split(/\n{2,}/).filter(p => p.trim());
-
-  const ssmlParts = paragraphs.map(para => {
-    // Split paragraph into sentences at Japanese/Western sentence endings
-    const sentences = para.split(/(?<=[。！？\!\?])\s*/).filter(s => s.trim());
-
-    const sentenceSSML = sentences.map(s => {
-      // Add short pauses at Japanese commas (、) and semicolons (；)
-      let processed = s
-        .replace(/、/g, '、<break time="180ms"/>')
-        .replace(/；/g, '；<break time="200ms"/>')
-        // Pause at colon-like structures (：)
-        .replace(/：/g, '：<break time="200ms"/>')
-        // Pause at parenthetical closes
-        .replace(/[）\)」』】]/g, (m) => m + '<break time="120ms"/>')
-        // Remove standalone newlines (single line breaks within paragraph)
-        .replace(/\n/g, '<break time="100ms"/>');
-
-      return `<s>${processed}</s>`;
-    }).join('<break time="350ms"/>');
-
-    return sentenceSSML;
-  });
-
-  // Join paragraphs with longer pauses
-  return ssmlParts.join('<break time="600ms"/>');
+  // Paragraph breaks → long pause
+  t = t.replace(/\n{2,}/g, ' <break time="500ms"/> ');
+  // Sentence endings → medium pause
+  t = t.replace(/([。！？])(?!\s*$)/g, '$1 <break time="300ms"/> ');
+  // Single newlines → short pause
+  t = t.replace(/\n/g, ' <break time="120ms"/> ');
+  return t.trim();
 }
 
 // Streaming handler: pipes WebSocket audio chunks directly to HTTP response
