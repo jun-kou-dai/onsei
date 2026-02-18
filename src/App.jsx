@@ -165,13 +165,17 @@ export default function EarFlow() {
         let detail = "";
         try { const parsed = JSON.parse(data.rawBody || ""); detail = parsed?.detail?.message || (typeof parsed?.detail === "string" ? parsed.detail : "") || parsed?.message || ""; } catch { detail = (data.rawBody || "").slice(0, 300); }
 
-        // 403 = key IS valid, just missing permissions (e.g. user_read)
-        if (st === 403) {
+        // "missing the permission" in body = key IS valid, just lacks specific permission
+        // ElevenLabs returns 401 (not 403) for this, so we must check body text
+        const bodyHint = (detail + " " + (data.rawBody || "")).toLowerCase();
+        const isMissingPermission = bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions");
+
+        if (isMissingPermission) {
           const info = { error: null, limited: true, tier: "unknown", used: 0, limit: 0, remaining: -1, detail };
           setElQuota(info);
           return info;
         }
-        // 401 = truly invalid key
+        // 401 without "missing permission" = truly invalid key
         if (st === 401) {
           setElQuota({ error: "invalid_key", detail, keyPreview: apiKey.slice(0, 6) + "..." });
           return { error: "invalid_key" };
