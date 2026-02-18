@@ -82,7 +82,7 @@ export default function EarFlow() {
   const [audioWorks, setAudioWorks] = useState(null); // null=untested, true, false
 
   // --- ElevenLabs state (persisted to localStorage) ---
-  const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "browser"));
+  const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "openai"));
   const [elApiKey, setElApiKeyRaw] = useState(() => lsGet("elApiKey", ""));
   const [elVoiceId, setElVoiceIdRaw] = useState(() => lsGet("elVoiceId", "Xb7hH8MSUJpSbSDYk0k2"));
   const [elQuota, setElQuota] = useState(null); // { used, limit, remaining, tier }
@@ -95,6 +95,11 @@ export default function EarFlow() {
     { id: "onwK4e9ZLuTAKqWW03F9", name: "Daniel（ニュース男性）" },
     { id: "JBFqnCBsd6RMkjVDRZzb", name: "George（深い男性）" },
   ]);
+
+  // --- OpenAI TTS state ---
+  const [oaiApiKey, setOaiApiKeyRaw] = useState(() => lsGet("oaiApiKey", ""));
+  const [oaiVoice, setOaiVoiceRaw] = useState(() => lsGet("oaiVoice", "nova"));
+  const [oaiModel, setOaiModelRaw] = useState(() => lsGet("oaiModel", "tts-1"));
 
   const audioRef = useRef(null); // HTML Audio element for ElevenLabs
   const playIdRef = useRef(0); // Guard against race conditions in async TTS
@@ -111,6 +116,9 @@ export default function EarFlow() {
   const setElApiKey = (v) => { setElApiKeyRaw(v); lsSet("elApiKey", v); };
   const setElVoiceId = (v) => { setElVoiceIdRaw(v); lsSet("elVoiceId", v); };
   const setRate = (v) => { setRateRaw(v); lsSet("rate", v); };
+  const setOaiApiKey = (v) => { setOaiApiKeyRaw(v); lsSet("oaiApiKey", v); };
+  const setOaiVoice = (v) => { setOaiVoiceRaw(v); lsSet("oaiVoice", v); };
+  const setOaiModel = (v) => { setOaiModelRaw(v); lsSet("oaiModel", v); };
 
   // --- ElevenLabs quota check (via server proxy to avoid CORS) ---
   const checkElQuota = async (key) => {
@@ -372,6 +380,127 @@ export default function EarFlow() {
     }
   };
 
+  // --- OpenAI TTS ---
+  const openaiSpeak = async (text, rateVal) => {
+    if (!oaiApiKey) { flash("⚠ OpenAI APIキーが設定されていません。設定から入力してください"); setSpeaking(false); return; }
+
+    const myPlayId = ++playIdRef.current;
+
+    try {
+      flash("音声生成中...");
+      setSpeaking(true);
+
+      // OpenAI TTS has 4096 char limit — chunk if needed
+      const maxChunk = 4096;
+      const chunks = [];
+      for (let i = 0; i < text.length; i += maxChunk) {
+        chunks.push(text.slice(i, i + maxChunk));
+      }
+
+      const blobs = [];
+      for (const chunk of chunks) {
+        if (playIdRef.current !== myPlayId) return;
+
+        let res;
+        try {
+          res = await fetch("/api/openai-tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              apiKey: oaiApiKey,
+              text: chunk,
+              voice: oaiVoice,
+              model: oaiModel,
+            }),
+          });
+        } catch (fetchErr) {
+          flash("⚠ ネットワークエラー: サーバーに接続できません");
+          setSpeaking(false);
+          return;
+        }
+
+        if (playIdRef.current !== myPlayId) return;
+
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          let msg = "";
+          try {
+            const parsed = JSON.parse(errBody);
+            msg = parsed?.detail?.error?.message || parsed?.error || errBody.slice(0, 150);
+          } catch { msg = errBody.slice(0, 150); }
+
+          if (res.status === 401) {
+            flash("⚠ OpenAI APIキーが無効です。キーを確認してください");
+          } else if (res.status === 429) {
+            flash("⚠ レート制限。少し待ってから再試行してください");
+          } else {
+            flash("⚠ OpenAI TTS エラー: " + msg);
+          }
+          setSpeaking(false);
+          return;
+        }
+
+        blobs.push(await res.blob());
+      }
+
+      if (playIdRef.current !== myPlayId) return;
+
+      // Combine blobs if multiple chunks
+      const combined = new Blob(blobs, { type: "audio/mpeg" });
+      if (combined.size < 100) {
+        flash("⚠ 音声データが空です");
+        setSpeaking(false);
+        return;
+      }
+
+      const url = URL.createObjectURL(combined);
+
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+      }
+
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.playbackRate = rateVal ?? 1.0;
+      audio.volume = 1.0;
+
+      audio.onplay = () => {
+        setSpeaking(true); setPaused(false);
+        flash("");
+      };
+
+      audio.onended = () => {
+        setSpeaking(false); setPaused(false); setProgress(100);
+        stopProgress();
+        URL.revokeObjectURL(url);
+        // Auto-play next
+        const nextIdx = activeIdxRef.current + 1;
+        const q = queueRef.current;
+        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
+          setActiveIdx(nextIdx);
+          activeIdxRef.current = nextIdx;
+          const nextText = q[nextIdx].text;
+          if (nextText) openaiSpeak(nextText, rateVal);
+        }
+      };
+
+      audio.onerror = () => {
+        setSpeaking(false); flash("⚠ 音声再生エラー");
+        URL.revokeObjectURL(url);
+      };
+
+      audio.ontimeupdate = () => {
+        if (audio.duration > 0) setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+      };
+
+      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+    } catch (e) {
+      flash("⚠ " + e.message);
+      setSpeaking(false);
+    }
+  };
+
   // --- Unified stop (both engines) ---
   const stopAll = () => {
     playIdRef.current++; // Cancel any pending ElevenLabs requests
@@ -554,17 +683,22 @@ export default function EarFlow() {
       activeIdxRef.current = index;
       setProgress(0);
 
-      if (ttsEngine === "elevenlabs") {
+      if (ttsEngine === "openai") {
+        openaiSpeak(fullText, rate);
+      } else if (ttsEngine === "elevenlabs") {
         elSpeak(fullText, rate);
       } else {
-        stoppedRef.current = false;
-        const chunks = splitText(fullText);
-        chunksRef.current = chunks;
-        chunkIdxRef.current = 0;
-        totalCharsRef.current = fullText.length;
-        spokenCharsRef.current = 0;
-        currentRateRef.current = rate;
-        speakChunk(0, rate);
+        // Small delay after cancel() to avoid Chrome speechSynthesis hang
+        setTimeout(() => {
+          stoppedRef.current = false;
+          const chunks = splitText(fullText);
+          chunksRef.current = chunks;
+          chunkIdxRef.current = 0;
+          totalCharsRef.current = fullText.length;
+          spokenCharsRef.current = 0;
+          currentRateRef.current = rate;
+          speakChunk(0, rate);
+        }, 100);
       }
     } catch (e) {
       flash("⚠ " + e.message);
@@ -574,7 +708,7 @@ export default function EarFlow() {
   // --- PAUSE ---
   const handlePause = () => {
     try {
-      if (ttsEngine === "elevenlabs" && audioRef.current) {
+      if ((ttsEngine === "elevenlabs" || ttsEngine === "openai") && audioRef.current) {
         audioRef.current.pause();
       } else {
         window.speechSynthesis?.pause();
@@ -587,7 +721,7 @@ export default function EarFlow() {
   // --- RESUME ---
   const handleResume = () => {
     try {
-      if (ttsEngine === "elevenlabs" && audioRef.current) {
+      if ((ttsEngine === "elevenlabs" || ttsEngine === "openai") && audioRef.current) {
         audioRef.current.play();
       } else {
         window.speechSynthesis?.resume();
@@ -615,7 +749,7 @@ export default function EarFlow() {
     setRate(newRate);
     currentRateRef.current = newRate;
     if (speaking && activeIdx >= 0) {
-      if (ttsEngine === "elevenlabs" && audioRef.current) {
+      if ((ttsEngine === "elevenlabs" || ttsEngine === "openai") && audioRef.current) {
         audioRef.current.playbackRate = newRate;
       } else {
         stoppedRef.current = true;
@@ -885,16 +1019,77 @@ export default function EarFlow() {
 
             {/* TTS Engine */}
             <div style={{ fontSize: 12, color: "#aaa", marginBottom: 6 }}>音声エンジン</div>
-            <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
-              {[["browser", "🔊 ブラウザ内蔵"], ["elevenlabs", "✨ ElevenLabs"]].map(([k, l]) => (
+            <div style={{ display: "flex", gap: 4, marginBottom: 12, flexWrap: "wrap" }}>
+              {[["openai", "OpenAI（推奨）", "#10a37f"], ["elevenlabs", "ElevenLabs", "#8b5cf6"], ["browser", "ブラウザ内蔵", "#50dcb4"]].map(([k, l, clr]) => (
                 <button key={k} onClick={() => { setTtsEngine(k); setAudioTested(false); setAudioWorks(null); }} style={{
-                  background: ttsEngine === k ? (k === "elevenlabs" ? "#8b5cf6" : "#50dcb4") : "rgba(255,255,255,0.04)",
+                  background: ttsEngine === k ? clr : "rgba(255,255,255,0.04)",
                   color: ttsEngine === k ? "#fff" : "#666",
                   border: ttsEngine === k ? "none" : "1px solid rgba(255,255,255,0.06)",
                   borderRadius: 8, padding: "8px 14px", fontSize: 12, fontWeight: ttsEngine === k ? 700 : 400,
                 }}>{l}</button>
               ))}
             </div>
+
+            {/* OpenAI settings */}
+            {ttsEngine === "openai" && (
+              <div style={{ background: "rgba(16,163,127,0.05)", borderRadius: 10, padding: 12, marginBottom: 12, border: "1px solid rgba(16,163,127,0.15)" }}>
+                <div style={{ fontSize: 11, color: "#10a37f", marginBottom: 8, fontWeight: 600 }}>OpenAI TTS 設定</div>
+
+                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>APIキー</div>
+                <input
+                  type="password"
+                  value={oaiApiKey}
+                  onChange={e => setOaiApiKey(e.target.value.trim())}
+                  placeholder="sk-..."
+                  style={{
+                    width: "100%", background: "#12121c", border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 8, color: "#ddd", padding: "8px 10px", fontSize: 12, marginBottom: 8,
+                    boxSizing: "border-box",
+                  }}
+                />
+
+                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>音声</div>
+                <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 8 }}>
+                  {[
+                    ["nova", "Nova（女性・自然）"],
+                    ["alloy", "Alloy（中性）"],
+                    ["echo", "Echo（男性）"],
+                    ["fable", "Fable（男性・語り）"],
+                    ["onyx", "Onyx（男性・低音）"],
+                    ["shimmer", "Shimmer（女性・明るい）"],
+                  ].map(([id, label]) => (
+                    <button key={id} onClick={() => setOaiVoice(id)} style={{
+                      background: oaiVoice === id ? "rgba(16,163,127,0.15)" : "transparent",
+                      color: oaiVoice === id ? "#34d399" : "#666",
+                      border: oaiVoice === id ? "1px solid rgba(16,163,127,0.3)" : "1px solid rgba(255,255,255,0.04)",
+                      borderRadius: 6, padding: "6px 10px", fontSize: 11, textAlign: "left",
+                    }}>{label}</button>
+                  ))}
+                </div>
+
+                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>モデル</div>
+                <div style={{ display: "flex", gap: 3, marginBottom: 8 }}>
+                  {[["tts-1", "標準（速い）"], ["tts-1-hd", "HD（高音質）"]].map(([id, label]) => (
+                    <button key={id} onClick={() => setOaiModel(id)} style={{
+                      background: oaiModel === id ? "rgba(16,163,127,0.15)" : "transparent",
+                      color: oaiModel === id ? "#34d399" : "#666",
+                      border: oaiModel === id ? "1px solid rgba(16,163,127,0.3)" : "1px solid rgba(255,255,255,0.04)",
+                      borderRadius: 6, padding: "6px 10px", fontSize: 11,
+                    }}>{label}</button>
+                  ))}
+                </div>
+
+                {!oaiApiKey && (
+                  <div style={{ fontSize: 11, color: "#e08080", marginTop: 4 }}>
+                    APIキーを入力してください（platform.openai.com → API keys）
+                  </div>
+                )}
+
+                <div style={{ fontSize: 10, color: "#555", marginTop: 6, lineHeight: 1.5 }}>
+                  料金: 標準 $0.015/1K文字、HD $0.030/1K文字。日本語の音声品質が高くおすすめです。
+                </div>
+              </div>
+            )}
 
             {/* ElevenLabs settings */}
             {ttsEngine === "elevenlabs" && (
@@ -1004,12 +1199,17 @@ export default function EarFlow() {
 
             {ttsEngine === "browser" && (
               <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
-                音声はブラウザ内蔵の日本語音声を使用。⚙ Chrome設定の「言語」で日本語を追加すると音声品質が向上する場合があります。
+                ブラウザ内蔵の日本語音声。音質は端末に依存します。
+              </div>
+            )}
+            {ttsEngine === "openai" && (
+              <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
+                OpenAI TTS。高品質な日本語音声。速度変更は再生中にも可能です。
               </div>
             )}
             {ttsEngine === "elevenlabs" && (
               <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
-                ElevenLabsの高品質AI音声を使用。速度変更は再生中にも可能です。
+                ElevenLabsのAI音声を使用。速度変更は再生中にも可能です。
               </div>
             )}
           </div>
