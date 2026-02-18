@@ -137,6 +137,25 @@ function splitTextSmart(text, maxLen = 5000) {
   return result.filter(c => c.length > 0);
 }
 
+// Split text into display sentences for highlight tracking
+function splitIntoSentences(text) {
+  const result = [];
+  let buf = "";
+  for (let i = 0; i < text.length; i++) {
+    buf += text[i];
+    const ch = text[i];
+    if ((ch === "。" || ch === "！" || ch === "？" || ch === "!" || ch === "?") && buf.trim().length >= 5) {
+      result.push(buf.trim());
+      buf = "";
+    } else if (ch === "\n" && buf.trim().length >= 5) {
+      result.push(buf.trim());
+      buf = "";
+    }
+  }
+  if (buf.trim().length > 0) result.push(buf.trim());
+  return result.filter(s => s.length > 0);
+}
+
 async function pdfToText(buf) {
   if (!(await loadPdf())) throw new Error("PDF.js読込失敗");
   const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
@@ -182,6 +201,13 @@ export default function EarFlow() {
   const [isDrag, setIsDrag] = useState(false);
   const [audioTested, setAudioTested] = useState(false);
   const [audioWorks, setAudioWorks] = useState(null); // null=untested, true, false
+
+  // --- Highlight state ---
+  const [sentences, setSentences] = useState([]);
+  const [highlightIdx, setHighlightIdx] = useState(-1);
+  const [showTranscript, setShowTranscriptRaw] = useState(() => lsGet("showTranscript", true));
+  const sentenceOffsetsRef = useRef([]); // cumulative char offsets
+  const highlightIdxRef = useRef(-1);
 
   // --- ElevenLabs state (persisted to localStorage) ---
   const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "edge"));
@@ -240,6 +266,7 @@ export default function EarFlow() {
   const setOaiApiKey = (v) => { setOaiApiKeyRaw(v); lsSet("oaiApiKey", v); };
   const setOaiVoice = (v) => { setOaiVoiceRaw(v); lsSet("oaiVoice", v); };
   const setOaiModel = (v) => { setOaiModelRaw(v); lsSet("oaiModel", v); };
+  const setShowTranscript = (v) => { setShowTranscriptRaw(v); lsSet("showTranscript", v); };
   const edgeVoiceRef = useRef(edgeVoice);
   const setEdgeVoice = (v) => {
     setEdgeVoiceRaw(v); lsSet("edgeVoice", v);
@@ -322,7 +349,8 @@ export default function EarFlow() {
         playIdRef.current++;
         if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; audioRef.current = null; }
         // Restart with new voice
-        edgeSpeak(item.text, rate);
+        setupSentences(item.text);
+        edgeSpeak(item.text, currentRateRef.current);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -348,6 +376,56 @@ export default function EarFlow() {
 
   const flash = (msg) => setStatus(msg);
   const upd = (id, u) => setQueue(q => q.map(x => x.id === id ? { ...x, ...u } : x));
+
+  // --- Highlight helpers ---
+  const setupSentences = (text) => {
+    const sents = splitIntoSentences(text);
+    setSentences(sents);
+    let cum = 0;
+    sentenceOffsetsRef.current = sents.map(s => { cum += s.length; return cum; });
+    if (sents.length > 0) {
+      setHighlightIdx(0);
+      highlightIdxRef.current = 0;
+    } else {
+      setHighlightIdx(-1);
+      highlightIdxRef.current = -1;
+    }
+  };
+
+  const resetHighlight = () => {
+    setSentences([]);
+    setHighlightIdx(-1);
+    highlightIdxRef.current = -1;
+    sentenceOffsetsRef.current = [];
+  };
+
+  const updateHighlightFromAudio = (currentTime, duration) => {
+    const offsets = sentenceOffsetsRef.current;
+    if (!offsets.length || !duration || !isFinite(duration)) return;
+    const totalChars = offsets[offsets.length - 1];
+    const charPos = (currentTime / duration) * totalChars;
+    let idx = offsets.length - 1;
+    for (let i = 0; i < offsets.length; i++) {
+      if (charPos < offsets[i]) { idx = i; break; }
+    }
+    if (idx !== highlightIdxRef.current) {
+      highlightIdxRef.current = idx;
+      setHighlightIdx(idx);
+    }
+  };
+
+  const updateHighlightFromCharPos = (charPos) => {
+    const offsets = sentenceOffsetsRef.current;
+    if (!offsets.length) return;
+    let idx = offsets.length - 1;
+    for (let i = 0; i < offsets.length; i++) {
+      if (charPos < offsets[i]) { idx = i; break; }
+    }
+    if (idx !== highlightIdxRef.current) {
+      highlightIdxRef.current = idx;
+      setHighlightIdx(idx);
+    }
+  };
 
   /* ================================================
      SPEECH FUNCTIONS
@@ -501,8 +579,12 @@ export default function EarFlow() {
         if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
           setActiveIdx(nextIdx);
           activeIdxRef.current = nextIdx;
+          setupSentences(q[nextIdx].text);
           const nextText = q[nextIdx].text;
           if (nextText) elSpeak(nextText, rateVal);
+        } else {
+          setActiveIdx(-1); activeIdxRef.current = -1;
+          resetHighlight();
         }
       };
 
@@ -512,7 +594,10 @@ export default function EarFlow() {
       };
 
       audio.ontimeupdate = () => {
-        if (audio.duration > 0) setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+        if (audio.duration > 0) {
+          setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+          updateHighlightFromAudio(audio.currentTime, audio.duration);
+        }
       };
 
       audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
@@ -618,8 +703,12 @@ export default function EarFlow() {
         if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
           setActiveIdx(nextIdx);
           activeIdxRef.current = nextIdx;
+          setupSentences(q[nextIdx].text);
           const nextText = q[nextIdx].text;
           if (nextText) openaiSpeak(nextText, rateVal);
+        } else {
+          setActiveIdx(-1); activeIdxRef.current = -1;
+          resetHighlight();
         }
       };
 
@@ -629,7 +718,10 @@ export default function EarFlow() {
       };
 
       audio.ontimeupdate = () => {
-        if (audio.duration > 0) setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+        if (audio.duration > 0) {
+          setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+          updateHighlightFromAudio(audio.currentTime, audio.duration);
+        }
       };
 
       audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
@@ -671,15 +763,21 @@ export default function EarFlow() {
       const q = queueRef.current;
       if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
         setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
+        setupSentences(q[nextIdx].text);
         if (nextIdx + 1 < q.length && q[nextIdx + 1]?.status === "ready")
           preloadEdgeAudio(q[nextIdx + 1].id, q[nextIdx + 1].text);
         if (q[nextIdx].text) edgeSpeak(q[nextIdx].text, rateVal);
+      } else {
+        setActiveIdx(-1); activeIdxRef.current = -1;
+        resetHighlight();
       }
     };
     audio.onerror = () => { setSpeaking(false); flash("⚠ 再生エラー"); URL.revokeObjectURL(urlToRevoke); };
     audio.ontimeupdate = () => {
-      if (audio.duration > 0 && isFinite(audio.duration))
+      if (audio.duration > 0 && isFinite(audio.duration)) {
         setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+        updateHighlightFromAudio(audio.currentTime, audio.duration);
+      }
     };
   };
 
@@ -836,6 +934,7 @@ export default function EarFlow() {
     setActiveIdx(-1);
     stopKeepAlive();
     stopProgress();
+    resetHighlight();
   };
 
   // --- AUDIO TEST (synchronous from click) ---
@@ -924,6 +1023,8 @@ export default function EarFlow() {
       setProgress(100);
       stopKeepAlive();
       stopProgress();
+      setActiveIdx(-1); activeIdxRef.current = -1;
+      resetHighlight();
       return;
     }
 
@@ -943,12 +1044,22 @@ export default function EarFlow() {
         setPaused(false);
         startKeepAlive();
       }
+      // Update highlight based on spoken character position
+      updateHighlightFromCharPos(spokenCharsRef.current);
     };
+
+    // Word-level highlight updates within a chunk
+    u.addEventListener("boundary", (e) => {
+      if (e.name === "word") {
+        updateHighlightFromCharPos(spokenCharsRef.current + (e.charIndex || 0));
+      }
+    });
 
     u.onend = () => {
       spokenCharsRef.current += text.length;
       const total = totalCharsRef.current;
       if (total > 0) setProgress(Math.round((spokenCharsRef.current / total) * 100));
+      updateHighlightFromCharPos(spokenCharsRef.current);
       // Speak next chunk
       speakChunk(chunkIdx + 1, r);
     };
@@ -995,6 +1106,7 @@ export default function EarFlow() {
       setActiveIdx(index);
       activeIdxRef.current = index;
       setProgress(0);
+      setupSentences(fullText);
 
       if (ttsEngine === "edge") {
         edgeSpeak(fullText, rate);
@@ -1071,6 +1183,11 @@ export default function EarFlow() {
         stoppedRef.current = true;
         window.speechSynthesis?.cancel();
         stopKeepAlive();
+        // Recalculate correct spoken chars to prevent double-counting
+        const chunks = chunksRef.current;
+        let correctChars = 0;
+        for (let i = 0; i < chunkIdxRef.current; i++) correctChars += chunks[i].length;
+        spokenCharsRef.current = correctChars;
         stoppedRef.current = false;
         speakChunk(chunkIdxRef.current, newRate);
       }
@@ -1771,6 +1888,28 @@ export default function EarFlow() {
             <div style={{ fontSize: 13, color: "#444" }}>PDFをドロップ or テキスト貼り付け or デモ追加</div>
           </div>
         )}
+
+        {/* ========== TRANSCRIPT HIGHLIGHT ========== */}
+        {activeIdx >= 0 && sentences.length > 0 && (
+          <div style={{ marginBottom: 20, marginTop: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <span style={{ fontSize: 11, color: "#555" }}>
+                {showTranscript ? "読み上げテキスト" : ""}
+              </span>
+              <button
+                onClick={() => setShowTranscript(!showTranscript)}
+                style={{
+                  background: "transparent", border: "1px solid rgba(255,255,255,0.06)",
+                  borderRadius: 6, padding: "3px 8px", fontSize: 10, color: "#555", cursor: "pointer",
+                  fontFamily: "inherit",
+                }}
+              >{showTranscript ? "閉じる" : "字 テキスト表示"}</button>
+            </div>
+            {showTranscript && (
+              <TextHighlight sentences={sentences} highlightIdx={highlightIdx} />
+            )}
+          </div>
+        )}
       </div>
 
       {/* ========== PLAYER BAR ========== */}
@@ -1814,6 +1953,13 @@ export default function EarFlow() {
 
               {/* Controls */}
               <div style={{ display: "flex", gap: 4 }}>
+                <button onClick={() => setShowTranscript(!showTranscript)} title={showTranscript ? "テキスト非表示" : "テキスト表示"} style={{
+                  width: 38, height: 38, borderRadius: "50%",
+                  background: showTranscript ? "rgba(80,220,180,0.15)" : "#1a1a26",
+                  color: showTranscript ? "#50dcb4" : "#555",
+                  border: showTranscript ? "1px solid rgba(80,220,180,0.3)" : "1px solid #252535",
+                  fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center",
+                }}>字</button>
                 <button onClick={paused ? handleResume : handlePause} style={{
                   width: 38, height: 38, borderRadius: "50%", background: "#50dcb4", color: "#111",
                   border: "none", fontSize: 15, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700,
@@ -1831,6 +1977,60 @@ export default function EarFlow() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* --- Text Highlight Component (karaoke-style) --- */
+function TextHighlight({ sentences, highlightIdx }) {
+  const scrollRef = useRef(null);
+  const activeRef = useRef(null);
+
+  useEffect(() => {
+    if (activeRef.current && scrollRef.current) {
+      const container = scrollRef.current;
+      const el = activeRef.current;
+      const elTop = el.offsetTop - container.offsetTop;
+      const elH = el.offsetHeight;
+      const scrollTop = container.scrollTop;
+      const viewH = container.clientHeight;
+      // Only scroll if element is outside the visible area (with padding)
+      if (elTop < scrollTop + 20 || elTop + elH > scrollTop + viewH - 20) {
+        container.scrollTo({ top: Math.max(0, elTop - viewH / 3), behavior: "smooth" });
+      }
+    }
+  }, [highlightIdx]);
+
+  if (!sentences.length) return null;
+
+  return (
+    <div ref={scrollRef} style={{
+      maxHeight: 260, overflowY: "auto", padding: "14px 16px",
+      background: "rgba(8,8,14,0.8)", borderRadius: 12,
+      border: "1px solid rgba(255,255,255,0.04)",
+      lineHeight: 2.0, fontSize: 14,
+      scrollbarWidth: "thin", scrollbarColor: "#333 transparent",
+    }}>
+      {sentences.map((s, i) => {
+        const isCurrent = i === highlightIdx;
+        const isPast = i < highlightIdx;
+        return (
+          <span key={i}>
+            {i > 0 && " "}
+            <span
+              ref={isCurrent ? activeRef : null}
+              style={{
+                color: isCurrent ? "#fff" : isPast ? "#4a4a5a" : "#777",
+                background: isCurrent ? "rgba(80,220,180,0.12)" : "transparent",
+                borderRadius: isCurrent ? 4 : 0,
+                padding: isCurrent ? "1px 3px" : "1px 0",
+                transition: "color 0.3s, background 0.3s",
+                borderBottom: isCurrent ? "2px solid rgba(80,220,180,0.4)" : "2px solid transparent",
+              }}
+            >{s}</span>
+          </span>
+        );
+      })}
     </div>
   );
 }
