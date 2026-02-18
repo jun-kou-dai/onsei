@@ -29,10 +29,10 @@ export default async function handler(req, res) {
         // JSON parse failed but key is still valid
       }
     } else {
-      // Key check failed — return details for frontend
+      // Subscription failed — still record details but DON'T return yet
+      // (TTS probe will still run below to check if speech generation works)
       out.elStatus = subRes.status;
       out.rawBody = rawBody;
-      return res.status(200).json(out);
     }
 
     // 2) TTS probe (can we actually generate speech?)

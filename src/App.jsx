@@ -148,7 +148,12 @@ export default function EarFlow() {
         const isMissingPermission = bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions");
 
         if (isMissingPermission) {
-          const info = { error: null, key_ok: true, tts_ok: null, limited: true, tier: "unknown", used: 0, limit: 0, remaining: -1, detail };
+          const info = { error: null, key_ok: true, tts_ok: data.tts_ok ?? null, tts_reason: "", limited: true, tier: "unknown", used: 0, limit: 0, remaining: -1, detail };
+          // Extract tts_reason if TTS probe failed
+          if (data.tts_ok === false && data.tts_detail) {
+            const td = data.tts_detail;
+            info.tts_reason = typeof td === "object" ? (td?.detail?.status || td?.status || "") : String(td || "");
+          }
           setElQuota(info);
           return info;
         }
@@ -306,8 +311,8 @@ export default function EarFlow() {
         let parsed = null;
         try { parsed = JSON.parse(errBody); } catch {}
         const detailObj = parsed?.detail;
-        const detailStatus = typeof detailObj === "object" ? detailObj?.status : "";
-        const detailMsg = typeof detailObj === "object" ? detailObj?.message : (typeof detailObj === "string" ? detailObj : "");
+        const detailStatus = typeof detailObj === "object" ? (detailObj?.status || detailObj?.detail?.status || "") : "";
+        const detailMsg = typeof detailObj === "object" ? (detailObj?.message || detailObj?.detail?.message || "") : (typeof detailObj === "string" ? detailObj : "");
         const fallbackMsg = parsed?.error || parsed?.message || errBody.slice(0, 150);
 
         if (detailStatus === "quota_exceeded") {
@@ -965,7 +970,16 @@ export default function EarFlow() {
                     lineHeight: 1.6,
                   }}>
                     {elQuota.limited
-                      ? <>✓ キー有効（アカウント照会OK）<br /><span style={{ color: "#888", fontSize: 10 }}>（残り文字数の確認権限がないため表示できません。生成可否はテスト再生で確認）</span></>
+                      ? <>
+                        ✓ キー有効（アカウント照会OK）
+                        {elQuota.tts_ok === true && <><br /><span style={{ color: "#50dcb4" }}>✓ 音声生成OK</span></>}
+                        {elQuota.tts_ok === false && (
+                          elQuota.tts_reason === "detected_unusual_activity"
+                            ? <><br /><span style={{ color: "#e08080" }}>⛔ 音声生成NG — 無料枠が停止されています（クラウドIPからのアクセス制限の可能性）。有料プランにするか「ブラウザ内蔵」に切り替えてください</span></>
+                            : <><br /><span style={{ color: "#e0b040" }}>⚠ 音声生成NG（{elQuota.tts_reason || "原因不明"}）</span></>
+                        )}
+                        {elQuota.tts_ok === null && <><br /><span style={{ color: "#888", fontSize: 10 }}>（残り文字数の確認権限がないため表示できません）</span></>}
+                      </>
                       : <>
                         ✓ キー有効（{elQuota.tier}）
                         — 残り <b>{elQuota.remaining.toLocaleString()}</b>文字
