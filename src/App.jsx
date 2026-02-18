@@ -147,7 +147,12 @@ export default function EarFlow() {
   const setOaiApiKey = (v) => { setOaiApiKeyRaw(v); lsSet("oaiApiKey", v); };
   const setOaiVoice = (v) => { setOaiVoiceRaw(v); lsSet("oaiVoice", v); };
   const setOaiModel = (v) => { setOaiModelRaw(v); lsSet("oaiModel", v); };
-  const setEdgeVoice = (v) => { setEdgeVoiceRaw(v); lsSet("edgeVoice", v); };
+  const edgeVoiceRef = useRef(edgeVoice);
+  const setEdgeVoice = (v) => {
+    setEdgeVoiceRaw(v); lsSet("edgeVoice", v);
+    edgeVoiceRef.current = v;
+    audioCacheRef.current.clear(); // clear preload cache when voice changes
+  };
 
   // --- ElevenLabs quota check (via server proxy to avoid CORS) ---
   const checkElQuota = async (key) => {
@@ -532,7 +537,8 @@ export default function EarFlow() {
 
   // --- Edge TTS audio preloader (background fetch, no UI) ---
   const preloadEdgeAudio = (itemId, text) => {
-    const key = `${itemId}_${edgeVoice}_${rate ?? 1.0}`;
+    const v = edgeVoiceRef.current;
+    const key = `${itemId}_${v}_${rate ?? 1.0}`;
     if (audioCacheRef.current.has(key)) return;
     const maxChunk = 5000;
     const chunks = [];
@@ -541,7 +547,7 @@ export default function EarFlow() {
       fetch("/api/edge-tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: chunk, voice: edgeVoice, rate: rate ?? 1.0 }),
+        body: JSON.stringify({ text: chunk, voice: v, rate: rate ?? 1.0 }),
       }).then(r => r.ok ? r.blob() : null)
     )).then(blobs => {
       if (blobs.every(b => b)) {
@@ -583,7 +589,8 @@ export default function EarFlow() {
 
       // 1. Check preload cache — instant playback
       const activeItem = queueRef.current[activeIdxRef.current];
-      const cacheKey = activeItem ? `${activeItem.id}_${edgeVoice}_${rateVal ?? 1.0}` : null;
+      const voice = edgeVoiceRef.current;
+      const cacheKey = activeItem ? `${activeItem.id}_${voice}_${rateVal ?? 1.0}` : null;
       const cached = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
 
       if (cached) {
@@ -613,7 +620,7 @@ export default function EarFlow() {
           fetchRes = await fetch("/api/edge-tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: chunks[0], voice: edgeVoice, rate: rateVal ?? 1.0 }),
+            body: JSON.stringify({ text: chunks[0], voice: voice, rate: rateVal ?? 1.0 }),
           });
         } catch {
           flash("⚠ ネットワークエラー"); setSpeaking(false); return;
@@ -677,7 +684,7 @@ export default function EarFlow() {
           fetch("/api/edge-tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: chunk, voice: edgeVoice, rate: rateVal ?? 1.0 }),
+            body: JSON.stringify({ text: chunk, voice: voice, rate: rateVal ?? 1.0 }),
           }).then(async r => {
             if (!r.ok) throw new Error(await r.text().catch(() => ""));
             return r.blob();
@@ -1647,7 +1654,7 @@ export default function EarFlow() {
 function SpeedChips({ rate, onChange, compact }) {
   return (
     <div style={{ display: "flex", gap: compact ? 2 : 4, alignItems: "center" }}>
-      {[0.8, 1.0, 1.15, 1.2, 1.25, 1.5, 2.0].map(r => {
+      {[0.8, 1.0, 1.15, 1.2, 1.25, 1.3, 1.5, 2.0].map(r => {
         const on = Math.abs(rate - r) < 0.01;
         return (
           <button key={r} onClick={() => onChange(r)} style={{
