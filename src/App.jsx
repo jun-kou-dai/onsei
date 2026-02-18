@@ -146,35 +146,35 @@ export default function EarFlow() {
   const setElVoiceId = (v) => { setElVoiceIdRaw(v); lsSet("elVoiceId", v); };
   const setRate = (v) => { setRateRaw(v); lsSet("rate", v); };
 
-  // --- ElevenLabs quota check ---
+  // --- ElevenLabs quota check (via server proxy to avoid CORS) ---
   const checkElQuota = async (key) => {
     const apiKey = key || elApiKey;
     if (!apiKey) { setElQuota(null); return null; }
     setElChecking(true);
     try {
-      const res = await fetch("https://api.elevenlabs.io/v1/user/subscription", {
-        headers: { "xi-api-key": apiKey },
+      const res = await fetch("/api/el-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey }),
       });
-      if (!res.ok) {
-        setElChecking(false);
-        const errText = await res.text().catch(() => "");
+      const data = await res.json();
+      setElChecking(false);
+      if (!data.ok) {
         let detail = "";
-        try { const parsed = JSON.parse(errText); detail = parsed?.detail?.message || parsed?.detail || parsed?.message || ""; } catch { detail = errText.slice(0, 200); }
-        if (res.status === 401) {
+        try { const parsed = JSON.parse(data.detail || ""); detail = parsed?.detail?.message || parsed?.detail || parsed?.message || ""; } catch { detail = (data.detail || "").slice(0, 200); }
+        if (data.status === 401) {
           setElQuota({ error: "invalid_key", detail, keyPreview: apiKey.slice(0, 6) + "..." });
           return { error: "invalid_key" };
         }
-        setElQuota({ error: "unknown", status: res.status, detail });
+        setElQuota({ error: "unknown", status: data.status, detail });
         return { error: "unknown" };
       }
-      const data = await res.json();
       const used = data.character_count || 0;
       const limit = data.character_limit || 0;
       const remaining = Math.max(0, limit - used);
       const tier = data.tier || "free";
       const info = { used, limit, remaining, tier, error: null };
       setElQuota(info);
-      setElChecking(false);
       return info;
     } catch (e) {
       setElChecking(false);
@@ -261,7 +261,7 @@ export default function EarFlow() {
       || null;
   };
 
-  // --- ElevenLabs TTS ---
+  // --- ElevenLabs TTS (via server proxy to avoid CORS) ---
   const elSpeak = async (text, rateVal) => {
     if (!elApiKey) { flash("⚠ ElevenLabs APIキーが設定されていません。⚙設定から入力してください"); setSpeaking(false); return; }
 
@@ -273,17 +273,19 @@ export default function EarFlow() {
 
       let res;
       try {
-        res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elVoiceId}`, {
+        res = await fetch("/api/tts", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "xi-api-key": elApiKey },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            apiKey: elApiKey,
+            voiceId: elVoiceId,
             text,
-            model_id: "eleven_multilingual_v2",
-            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+            modelId: "eleven_multilingual_v2",
+            voiceSettings: { stability: 0.5, similarity_boost: 0.75 },
           }),
         });
       } catch (fetchErr) {
-        flash("⚠ ネットワークエラー: ElevenLabs APIに接続できません");
+        flash("⚠ ネットワークエラー: サーバーに接続できません");
         setSpeaking(false);
         return;
       }
@@ -292,22 +294,13 @@ export default function EarFlow() {
 
       if (!res.ok) {
         const errBody = await res.text().catch(() => "");
+        let detail = "";
+        try { const parsed = JSON.parse(errBody); detail = parsed?.detail?.message || parsed?.detail || parsed?.error || ""; } catch { detail = errBody.slice(0, 150); }
         if (res.status === 401) {
-          // Check quota to give more specific feedback
-          const quota = await checkElQuota();
-          if (quota?.error === "invalid_key") {
-            flash("⚠ APIキーが無効です。elevenlabs.ioでキーを再生成してください");
-          } else if (quota && !quota.error && quota.remaining <= 0) {
-            flash("⚠ 無料枠を使い切りました（" + quota.used.toLocaleString() + "/" + quota.limit.toLocaleString() + "文字）。来月にリセットされます");
-          } else {
-            flash("⚠ APIキーが無効または期限切れです。elevenlabs.ioで確認してください");
-          }
+          flash("⚠ APIキー認証失敗: " + (detail || "キーを確認してください"));
         }
         else if (res.status === 429) flash("⚠ レート制限に達しました。30秒ほど待ってから再試行してください");
-        else if (res.status === 403) flash("⚠ アクセス拒否。APIキーの「テキスト読み上げ」権限を確認してください");
         else {
-          let detail = "";
-          try { const parsed = JSON.parse(errBody); detail = parsed?.detail?.message || parsed?.detail || ""; } catch {}
           flash("⚠ ElevenLabs エラー " + res.status + (detail ? ": " + detail : ""));
         }
         setSpeaking(false); return;
