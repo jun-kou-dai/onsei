@@ -57,6 +57,21 @@ function cleanTextForTTS(text) {
   return t.trim();
 }
 
+// Fetch with automatic retry (exponential backoff)
+async function fetchWithRetry(url, options, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok || res.status === 400) return res; // 400 = bad input, don't retry
+      if (i < retries) { await new Promise(r => setTimeout(r, 1000 * (i + 1))); continue; }
+      return res;
+    } catch (err) {
+      if (i >= retries) throw err;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+}
+
 // Smart text chunking: split at sentence boundaries, respecting maxLen
 function splitTextSmart(text, maxLen = 5000) {
   const result = [];
@@ -590,14 +605,15 @@ export default function EarFlow() {
     if (audioCacheRef.current.has(key)) return;
     const chunks = splitTextSmart(text, 5000);
     Promise.all(chunks.map(chunk =>
-      fetch("/api/edge-tts", {
+      fetchWithRetry("/api/edge-tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: chunk, voice: v, rate: rate ?? 1.0 }),
-      }).then(r => r.ok ? r.blob() : null)
+      }).then(r => r.ok ? r.blob() : null).catch(() => null)
     )).then(blobs => {
-      if (blobs.every(b => b)) {
-        const combined = new Blob(blobs, { type: "audio/mpeg" });
+      const valid = blobs.filter(b => b);
+      if (valid.length > 0) {
+        const combined = new Blob(valid, { type: "audio/mpeg" });
         if (combined.size >= 100) audioCacheRef.current.set(key, combined);
       }
     }).catch(() => {});
@@ -661,13 +677,13 @@ export default function EarFlow() {
       if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
         let fetchRes;
         try {
-          fetchRes = await fetch("/api/edge-tts", {
+          fetchRes = await fetchWithRetry("/api/edge-tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: chunks[0], voice: voice, rate: rateVal ?? 1.0 }),
           });
         } catch {
-          flash("⚠ ネットワークエラー"); setSpeaking(false); return;
+          flash("⚠ ネットワークエラー（リトライ失敗）"); setSpeaking(false); return;
         }
         if (!fetchRes.ok) {
           flash("⚠ 音声生成エラー: " + (await fetchRes.text().catch(() => "")).slice(0, 100));
@@ -721,22 +737,21 @@ export default function EarFlow() {
         return;
       }
 
-      // 3. Multi-chunk or no MediaSource — parallel fetch, blob playback
-      let blobs;
-      try {
-        blobs = await Promise.all(chunks.map(chunk =>
-          fetch("/api/edge-tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: chunk, voice: voice, rate: rateVal ?? 1.0 }),
-          }).then(async r => {
-            if (!r.ok) throw new Error(await r.text().catch(() => ""));
-            return r.blob();
-          })
-        ));
-      } catch (fetchErr) {
-        flash("⚠ 音声生成エラー: " + String(fetchErr.message).slice(0, 100));
+      // 3. Multi-chunk or no MediaSource — parallel fetch with retry, skip failed chunks
+      const blobResults = await Promise.all(chunks.map(chunk =>
+        fetchWithRetry("/api/edge-tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: chunk, voice: voice, rate: rateVal ?? 1.0 }),
+        }).then(async r => r.ok ? r.blob() : null).catch(() => null)
+      ));
+      const blobs = blobResults.filter(b => b && b.size >= 100);
+      if (blobs.length === 0) {
+        flash("⚠ 音声生成に失敗しました（リトライ済み）");
         setSpeaking(false); return;
+      }
+      if (blobs.length < chunks.length) {
+        flash(`⚠ ${chunks.length - blobs.length}チャンクをスキップ`);
       }
       if (playIdRef.current !== myPlayId) return;
 
