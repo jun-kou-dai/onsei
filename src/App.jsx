@@ -6,41 +6,7 @@ import { useState, useRef, useEffect } from "react";
    No async, no setTimeout, no indirection.
    ================================================ */
 
-// --- Modes ---
-const MODES = {
-  raw:      { label: "そのまま", icon: "📖", color: "#e8c468" },
-  briefing: { label: "ブリーフ", icon: "⚡", color: "#50dcb4" },
-  detailed: { label: "詳細",   icon: "📋", color: "#6ea8f0" },
-  headline: { label: "一言",   icon: "🎯", color: "#e07070" },
-};
 
-// --- Summarize via server-side proxy ---
-async function callSummarize(text, mode) {
-  if (mode === "raw") return text;
-  const max = 5000;
-  const t = text.length > max ? text.slice(0, max) + "\n（以下省略）" : text;
-  const inst = {
-    briefing: "重要ポイントを3〜5つに絞り日本語で要約。各1〜2文。冒頭にテーマを一言。",
-    detailed: "詳細に日本語で要約。重要な数字を含める。",
-    headline: "1〜2文で超要約。",
-  };
-  try {
-    const res = await fetch("/api/summarize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: t,
-        mode,
-        instruction: inst[mode] || inst.briefing,
-      }),
-    });
-    if (!res.ok) return null;
-    const d = await res.json();
-    return d.summary || null;
-  } catch {
-    return null;
-  }
-}
 
 // --- File readers ---
 const readBuf = (f) => new Promise((r, j) => { const x = new FileReader(); x.onload = () => r(x.result); x.onerror = j; x.readAsArrayBuffer(f); });
@@ -377,7 +343,7 @@ export default function EarFlow() {
         if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
           setActiveIdx(nextIdx);
           activeIdxRef.current = nextIdx;
-          const nextText = q[nextIdx].mode === "raw" ? q[nextIdx].text : q[nextIdx].summary;
+          const nextText = q[nextIdx].text;
           if (nextText) elSpeak(nextText, rateVal);
         }
       };
@@ -555,7 +521,7 @@ export default function EarFlow() {
     try {
       const item = queue[index];
       if (!item || item.status !== "ready") return;
-      const fullText = item.mode === "raw" ? item.text : item.summary;
+      const fullText = item.text;
       if (!fullText || fullText.length === 0) {
         flash("⚠ 再生するテキストがありません");
         return;
@@ -656,41 +622,17 @@ export default function EarFlow() {
   /* ================================================
      QUEUE MANAGEMENT
      ================================================ */
-  const addItem = async (text, title, sourceType, pageCount) => {
+  const addItem = (text, title, sourceType, pageCount) => {
     if (!text || text.trim().length < 5) { flash("⚠ テキストが短すぎます"); return; }
     const id = uid();
     setQueue(q => [...q, {
       id, text, title: title || text.slice(0, 35),
       sourceType: sourceType || "text",
-      mode: "briefing", summary: null,
-      status: "processing", errorMsg: null,
+      status: "ready",
       charCount: text.length, pageCount: pageCount || 0,
     }]);
-
-    // Summarize async
-    const s = await callSummarize(text, "briefing");
-    if (s) {
-      upd(id, { summary: s, status: "ready" });
-    } else {
-      upd(id, { summary: text.slice(0, 300), status: "ready", errorMsg: "要約失敗、テキスト冒頭を使用" });
-    }
   };
 
-  const changeMode = async (index, mode) => {
-    const item = queue[index];
-    if (!item) return;
-    if (mode === "raw") {
-      upd(item.id, { mode, summary: item.text, status: "ready" });
-    } else {
-      upd(item.id, { mode, summary: null, status: "processing" });
-      const s = await callSummarize(item.text, mode);
-      if (s) {
-        upd(item.id, { summary: s, status: "ready" });
-      } else {
-        upd(item.id, { summary: item.text.slice(0, 300), status: "ready", errorMsg: "要約失敗" });
-      }
-    }
-  };
 
   const removeItem = (index) => {
     if (index === activeIdx) handleStop();
@@ -1126,9 +1068,6 @@ export default function EarFlow() {
             </div>
 
             {queue.map((item, i) => {
-              const m = MODES[item.mode] || MODES.briefing;
-              const ready = item.status === "ready";
-              const loading = item.status === "processing";
               const isActive = i === activeIdx;
 
               return (
@@ -1136,14 +1075,12 @@ export default function EarFlow() {
                   ...S.card, padding: "12px 14px", marginBottom: 8,
                   borderColor: isActive ? "rgba(80,220,180,0.25)" : undefined,
                   background: isActive ? "rgba(80,220,180,0.04)" : undefined,
-                  opacity: loading ? 0.7 : 1,
                 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       {/* Meta */}
                       <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 9, color: "#444" }}>#{i + 1}</span>
-                        <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: `${m.color}15`, color: m.color, fontWeight: 600 }}>{m.icon} {m.label}</span>
                         <span style={{ fontSize: 9, color: "#444" }}>{item.charCount.toLocaleString()}字</span>
                         {item.pageCount > 0 && <span style={{ fontSize: 9, color: "#555" }}>{item.pageCount}p</span>}
                       </div>
@@ -1152,53 +1089,27 @@ export default function EarFlow() {
                         {item.title}
                       </div>
                       {/* Preview */}
-                      {ready && item.mode === "raw" && item.text && (
-                        <div style={{ fontSize: 12, color: "#a89860", marginTop: 5, lineHeight: 1.6 }}>
-                          📖 全文読み上げ: {item.text.slice(0, 100)}{item.text.length > 100 ? "…" : ""}
-                        </div>
-                      )}
-                      {ready && item.mode !== "raw" && item.summary && (
-                        <div style={{ fontSize: 12, color: "#777", marginTop: 5, lineHeight: 1.6 }}>
-                          {item.summary.slice(0, 120)}{item.summary.length > 120 ? "…" : ""}
-                        </div>
-                      )}
-                      {item.errorMsg && <div style={{ fontSize: 11, color: "#e08080", marginTop: 4 }}>{item.errorMsg}</div>}
+                      <div style={{ fontSize: 12, color: "#777", marginTop: 5, lineHeight: 1.6 }}>
+                        {item.text.slice(0, 100)}{item.text.length > 100 ? "…" : ""}
+                      </div>
                     </div>
 
                     {/* Actions */}
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end", flexShrink: 0 }}>
-                      <div style={{ display: "flex", gap: 3 }}>
-                        <button onClick={() => handlePlay(i)} disabled={!ready} style={{
-                          width: 34, height: 34, borderRadius: 8, border: "none",
-                          background: isActive ? "#50dcb4" : ready ? "#242434" : "#1a1a22",
-                          color: isActive ? "#111" : ready ? "#ccc" : "#444",
-                          fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center",
-                        }}>▶</button>
-                        <button onClick={() => removeItem(i)} style={{
-                          width: 34, height: 34, borderRadius: 8,
-                          background: "transparent", border: "1px solid #2a2a38",
-                          color: "#555", fontSize: 12,
-                          display: "flex", alignItems: "center", justifyContent: "center",
-                        }}>✕</button>
-                      </div>
-                      <div style={{ display: "flex", gap: 2 }}>
-                        {Object.entries(MODES).map(([k, v]) => (
-                          <button key={k} onClick={() => changeMode(i, k)} style={{
-                            background: item.mode === k ? `${v.color}18` : "transparent",
-                            color: item.mode === k ? v.color : "#3a3a48",
-                            border: item.mode === k ? `1px solid ${v.color}30` : "1px solid transparent",
-                            borderRadius: 5, padding: "2px 5px", fontSize: 9,
-                          }}>{v.icon}</button>
-                        ))}
-                      </div>
+                    <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
+                      <button onClick={() => handlePlay(i)} style={{
+                        width: 34, height: 34, borderRadius: 8, border: "none",
+                        background: isActive ? "#50dcb4" : "#242434",
+                        color: isActive ? "#111" : "#ccc",
+                        fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>▶</button>
+                      <button onClick={() => removeItem(i)} style={{
+                        width: 34, height: 34, borderRadius: 8,
+                        background: "transparent", border: "1px solid #2a2a38",
+                        color: "#555", fontSize: 12,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>✕</button>
                     </div>
                   </div>
-
-                  {loading && (
-                    <div style={{ marginTop: 6, fontSize: 11, color: "#50dcb4" }}>
-                      <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> AI要約中...
-                    </div>
-                  )}
                 </div>
               );
             })}
