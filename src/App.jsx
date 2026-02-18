@@ -579,6 +579,7 @@ export default function EarFlow() {
 
     try {
       setSpeaking(true);
+      generatedRateRef.current = rateVal ?? 1.0; // track SSML rate for live speed changes
 
       // 1. Check preload cache — instant playback
       const activeItem = queueRef.current[activeIdxRef.current];
@@ -779,6 +780,7 @@ export default function EarFlow() {
   const spokenCharsRef = useRef(0);
   const stoppedRef = useRef(false);
   const currentRateRef = useRef(1.0);
+  const generatedRateRef = useRef(1.0); // rate baked into SSML for current audio
 
   const splitText = (text) => {
     const maxLen = 200;
@@ -955,9 +957,9 @@ export default function EarFlow() {
     setRate(newRate);
     currentRateRef.current = newRate;
     if (speaking && activeIdx >= 0) {
-      if (ttsEngine !== "browser") {
-        // Edge TTS: rate is baked into SSML; next chunk will use new rate
-        // Don't set playbackRate to avoid robotic sound
+      if (ttsEngine !== "browser" && audioRef.current) {
+        // Audio was generated at generatedRateRef via SSML; adjust playbackRate as ratio
+        audioRef.current.playbackRate = newRate / (generatedRateRef.current || 1.0);
       } else {
         stoppedRef.current = true;
         window.speechSynthesis?.cancel();
@@ -1645,7 +1647,7 @@ export default function EarFlow() {
 function SpeedChips({ rate, onChange, compact }) {
   return (
     <div style={{ display: "flex", gap: compact ? 2 : 4, alignItems: "center" }}>
-      {[0.8, 1.0, 1.15, 1.25, 1.5, 2.0].map(r => {
+      {[0.8, 1.0, 1.15, 1.2, 1.25, 1.5, 2.0].map(r => {
         const on = Math.abs(rate - r) < 0.01;
         return (
           <button key={r} onClick={() => onChange(r)} style={{
