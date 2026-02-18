@@ -160,20 +160,25 @@ export default function EarFlow() {
       const data = await res.json();
       setElChecking(false);
       if (!data.ok) {
+        const st = data.elStatus;
+        // Parse detail message from raw body
         let detail = "";
-        try { const parsed = JSON.parse(data.detail || ""); detail = parsed?.detail?.message || parsed?.detail || parsed?.message || ""; } catch { detail = (data.detail || "").slice(0, 200); }
-        if (data.status === 401) {
+        try { const parsed = JSON.parse(data.rawBody || ""); detail = parsed?.detail?.message || (typeof parsed?.detail === "string" ? parsed.detail : "") || parsed?.message || ""; } catch { detail = (data.rawBody || "").slice(0, 300); }
+
+        // 403 = key IS valid, just missing permissions (e.g. user_read)
+        if (st === 403) {
+          const info = { error: null, limited: true, tier: "unknown", used: 0, limit: 0, remaining: -1, detail };
+          setElQuota(info);
+          return info;
+        }
+        // 401 = truly invalid key
+        if (st === 401) {
           setElQuota({ error: "invalid_key", detail, keyPreview: apiKey.slice(0, 6) + "..." });
           return { error: "invalid_key" };
         }
-        setElQuota({ error: "unknown", status: data.status, detail });
-        return { error: "unknown" };
-      }
-      if (data.limited) {
-        // Key is valid but lacks user_read permission — can't get quota
-        const info = { used: 0, limit: 0, remaining: -1, tier: data.tier || "unknown", error: null, limited: true };
-        setElQuota(info);
-        return info;
+        // Anything else
+        setElQuota({ error: "api_error", elStatus: st, detail, rawBody: (data.rawBody || "").slice(0, 300) });
+        return { error: "api_error" };
       }
       const used = data.character_count || 0;
       const limit = data.character_limit || 0;
@@ -971,7 +976,7 @@ export default function EarFlow() {
                 )}
                 {elQuota?.error === "invalid_key" && (
                   <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
-                    ✕ APIキーが無効です<br />
+                    ✕ APIキーが無効です（401 Unauthorized）<br />
                     {elQuota.keyPreview && <span style={{ color: "#888" }}>入力されたキー先頭: <code style={{ background: "#1a1a26", padding: "1px 4px", borderRadius: 3 }}>{elQuota.keyPreview}</code><br /></span>}
                     {elQuota.detail && <span style={{ color: "#888" }}>API応答: {elQuota.detail}<br /></span>}
                     <span style={{ color: "#c4b5fd" }}>確認事項：キーをコピーし直して、先頭や末尾に余分なスペースがないか確認してください</span>
@@ -983,10 +988,11 @@ export default function EarFlow() {
                     {elQuota.detail && <span style={{ color: "#888" }}>詳細: {elQuota.detail}</span>}
                   </div>
                 )}
-                {elQuota?.error === "unknown" && (
+                {elQuota?.error === "api_error" && (
                   <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
-                    ✕ エラー（ステータス: {elQuota.status}）<br />
-                    {elQuota.detail && <span style={{ color: "#888" }}>詳細: {elQuota.detail}</span>}
+                    ✕ APIエラー（ステータス: {elQuota.elStatus}）<br />
+                    {elQuota.detail && <span style={{ color: "#888" }}>API応答: {elQuota.detail}<br /></span>}
+                    {elQuota.rawBody && !elQuota.detail && <span style={{ color: "#888" }}>生レスポンス: {elQuota.rawBody}<br /></span>}
                   </div>
                 )}
 
