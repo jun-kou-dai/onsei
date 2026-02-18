@@ -157,11 +157,14 @@ export default function EarFlow() {
       });
       if (!res.ok) {
         setElChecking(false);
+        const errText = await res.text().catch(() => "");
+        let detail = "";
+        try { const parsed = JSON.parse(errText); detail = parsed?.detail?.message || parsed?.detail || parsed?.message || ""; } catch { detail = errText.slice(0, 200); }
         if (res.status === 401) {
-          setElQuota({ error: "invalid_key" });
+          setElQuota({ error: "invalid_key", detail, keyPreview: apiKey.slice(0, 6) + "..." });
           return { error: "invalid_key" };
         }
-        setElQuota({ error: "unknown", status: res.status });
+        setElQuota({ error: "unknown", status: res.status, detail });
         return { error: "unknown" };
       }
       const data = await res.json();
@@ -173,9 +176,9 @@ export default function EarFlow() {
       setElQuota(info);
       setElChecking(false);
       return info;
-    } catch {
+    } catch (e) {
       setElChecking(false);
-      setElQuota({ error: "network" });
+      setElQuota({ error: "network", detail: e.message });
       return { error: "network" };
     }
   };
@@ -963,13 +966,23 @@ export default function EarFlow() {
                   </div>
                 )}
                 {elQuota?.error === "invalid_key" && (
-                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)" }}>
-                    ✕ APIキーが無効です。elevenlabs.ioで新しいキーを作成してください
+                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
+                    ✕ APIキーが無効です<br />
+                    {elQuota.keyPreview && <span style={{ color: "#888" }}>入力されたキー先頭: <code style={{ background: "#1a1a26", padding: "1px 4px", borderRadius: 3 }}>{elQuota.keyPreview}</code><br /></span>}
+                    {elQuota.detail && <span style={{ color: "#888" }}>API応答: {elQuota.detail}<br /></span>}
+                    <span style={{ color: "#c4b5fd" }}>確認事項：キーをコピーし直して、先頭や末尾に余分なスペースがないか確認してください</span>
                   </div>
                 )}
                 {elQuota?.error === "network" && (
-                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)" }}>
-                    ✕ ネットワークエラー。接続を確認してください
+                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
+                    ✕ ネットワークエラー<br />
+                    {elQuota.detail && <span style={{ color: "#888" }}>詳細: {elQuota.detail}</span>}
+                  </div>
+                )}
+                {elQuota?.error === "unknown" && (
+                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
+                    ✕ エラー（ステータス: {elQuota.status}）<br />
+                    {elQuota.detail && <span style={{ color: "#888" }}>詳細: {elQuota.detail}</span>}
                   </div>
                 )}
 
