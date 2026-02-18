@@ -290,6 +290,8 @@ export default function EarFlow() {
           } else {
             flash("⚠ 文字数上限を超えています。短いテキストで試すか、来月のリセットをお待ちください");
           }
+        } else if (detailStatus === "detected_unusual_activity") {
+          flash("⚠ ElevenLabs無料枠が停止されています（クラウドIPからのアクセス制限）。有料プランにするか、「ブラウザ内蔵」に切り替えてください");
         } else if (res.status === 401) {
           const bodyHint = (detailMsg + " " + errBody).toLowerCase();
           if (bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions")) {

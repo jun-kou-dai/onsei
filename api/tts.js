@@ -27,10 +27,12 @@ export default async function handler(req, res) {
 
     if (!elRes.ok) {
       const errBody = await elRes.text().catch(() => "");
+      let errJson;
+      try { errJson = JSON.parse(errBody); } catch { errJson = errBody; }
       return res.status(elRes.status).json({
         error: "ElevenLabs API error",
         status: elRes.status,
-        detail: errBody,
+        detail: errJson,
       });
     }
 
