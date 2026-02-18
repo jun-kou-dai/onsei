@@ -202,11 +202,7 @@ export default function EarFlow() {
   const [oaiModel, setOaiModelRaw] = useState(() => lsGet("oaiModel", "tts-1"));
 
   // --- Edge TTS state ---
-  const VALID_EDGE_VOICES = [
-    "ja-JP-NanamiNeural", "ja-JP-KeitaNeural",
-    "ja-JP-AoiNeural", "ja-JP-DaichiNeural",
-    "ja-JP-MayuNeural", "ja-JP-NaokiNeural", "ja-JP-ShioriNeural",
-  ];
+  const VALID_EDGE_VOICES = ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"];
   const [edgeVoice, setEdgeVoiceRaw] = useState(() => {
     const saved = lsGet("edgeVoice", "ja-JP-NanamiNeural");
     return VALID_EDGE_VOICES.includes(saved) ? saved : "ja-JP-NanamiNeural";
@@ -1382,23 +1378,15 @@ export default function EarFlow() {
                 <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>音声</div>
                 <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 8 }}>
                   {[
-                    ["ja-JP-NanamiNeural", "Nanami", "♀ 明るい"],
-                    ["ja-JP-KeitaNeural", "Keita", "♂ 落ち着き"],
-                    ["ja-JP-AoiNeural", "Aoi", "♀ 柔らか"],
-                    ["ja-JP-DaichiNeural", "Daichi", "♂ ニュース"],
-                    ["ja-JP-MayuNeural", "Mayu", "♀ 若い"],
-                    ["ja-JP-NaokiNeural", "Naoki", "♂ 自然"],
-                    ["ja-JP-ShioriNeural", "Shiori", "♀ 丁寧"],
-                  ].map(([id, name, desc]) => (
+                    ["ja-JP-NanamiNeural", "Nanami（女性）"],
+                    ["ja-JP-KeitaNeural", "Keita（男性）"],
+                  ].map(([id, label]) => (
                     <button key={id} onClick={() => setEdgeVoice(id)} style={{
                       background: edgeVoice === id ? "rgba(0,120,212,0.15)" : "transparent",
                       color: edgeVoice === id ? "#60a5fa" : "#666",
                       border: edgeVoice === id ? "1px solid rgba(0,120,212,0.3)" : "1px solid rgba(255,255,255,0.04)",
-                      borderRadius: 6, padding: "6px 10px", fontSize: 11, textAlign: "left", lineHeight: 1.4,
-                    }}>
-                      <span style={{ fontWeight: 600 }}>{name}</span>
-                      <span style={{ fontSize: 10, color: edgeVoice === id ? "#60a5fa" : "#555", marginLeft: 4 }}>{desc}</span>
-                    </button>
+                      borderRadius: 6, padding: "6px 10px", fontSize: 11, textAlign: "left",
+                    }}>{label}</button>
                   ))}
                 </div>
 
