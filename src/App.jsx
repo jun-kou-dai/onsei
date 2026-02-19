@@ -1086,6 +1086,9 @@ export default function EarFlow() {
 
     // ElevenLabs Audio
     if (audioRef.current) {
+      audioRef.current.onended = null;
+      audioRef.current.onerror = null;
+      audioRef.current.ontimeupdate = null;
       audioRef.current.pause();
       audioRef.current.src = "";
       audioRef.current = null;
@@ -1259,6 +1262,9 @@ export default function EarFlow() {
       chunkIdxRef.current = 0;
       window.speechSynthesis?.cancel();
       if (audioRef.current) {
+        audioRef.current.onended = null;
+        audioRef.current.onerror = null;
+        audioRef.current.ontimeupdate = null;
         audioRef.current.pause();
         audioRef.current.src = "";
         audioRef.current = null;
@@ -1348,6 +1354,7 @@ export default function EarFlow() {
       handlePlay(next);
     } else {
       handleStop();
+      flash("キューの最後です");
     }
   };
 
