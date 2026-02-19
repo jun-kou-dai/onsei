@@ -57,17 +57,21 @@ function cleanTextForTTS(text) {
   return t.trim();
 }
 
-// Fetch with automatic retry (exponential backoff)
-async function fetchWithRetry(url, options, retries = 2) {
+// Fetch with automatic retry (exponential backoff) and per-request timeout
+async function fetchWithRetry(url, options, retries = 1, timeoutMs = 18000) {
   for (let i = 0; i <= retries; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { ...options, signal: controller.signal });
       if (res.ok || res.status === 400) return res; // 400 = bad input, don't retry
-      if (i < retries) { await new Promise(r => setTimeout(r, 1000 * (i + 1))); continue; }
+      clearTimeout(timer);
+      if (i < retries) { await new Promise(r => setTimeout(r, 800 * (i + 1))); continue; }
       return res;
     } catch (err) {
+      clearTimeout(timer);
       if (i >= retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      await new Promise(r => setTimeout(r, 800 * (i + 1)));
     }
   }
 }

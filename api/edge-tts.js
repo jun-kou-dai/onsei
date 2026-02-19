@@ -1,19 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import WebSocket from "ws";
 
 const TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-const CHROMIUM_FULL_VERSION = "143.0.3650.75";
-const GEC_VERSION = `1-${CHROMIUM_FULL_VERSION}`;
-
-function computeGEC() {
-  const WIN_EPOCH = 116444736000000000n;
-  const ticks = BigInt(Math.round(Date.now() * 10000)) + WIN_EPOCH;
-  const FIVE_MIN = 3000000000n;
-  const rounded = ticks - (ticks % FIVE_MIN);
-  const input = `${rounded}${TOKEN}`;
-  return createHash("sha256").update(input, "utf8").digest("hex").toUpperCase();
-}
 
 // Escape text for embedding in SSML (XML entity escaping only)
 function escapeSSML(text) {
@@ -39,8 +28,7 @@ export default function handler(req, res) {
   const xmlLang = langMatch ? langMatch[1] : "ja-JP";
 
   const connId = randomUUID().replaceAll("-", "");
-  const gec = computeGEC();
-  const wsUrl = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TOKEN}&Sec-MS-GEC=${gec}&Sec-MS-GEC-Version=${GEC_VERSION}&ConnectionId=${connId}`;
+  const wsUrl = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TOKEN}&ConnectionId=${connId}`;
 
   let headersSent = false;
   let finished = false;
@@ -49,7 +37,7 @@ export default function handler(req, res) {
     host: "speech.platform.bing.com",
     origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
     headers: {
-      "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROMIUM_FULL_VERSION} Safari/537.36 Edg/${CHROMIUM_FULL_VERSION}`,
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.66 Safari/537.36 Edg/103.0.1264.44",
     },
   });
 
@@ -65,7 +53,7 @@ export default function handler(req, res) {
     }
   };
 
-  const timer = setTimeout(() => finish("TTS timeout (30s)"), 30000);
+  const timer = setTimeout(() => finish("TTS timeout (15s)"), 15000);
 
   // Abort if client disconnects
   req.on("close", () => finish("Client disconnected"));
@@ -76,20 +64,24 @@ export default function handler(req, res) {
         synthesis: {
           audio: {
             metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false },
-            outputFormat: "audio-24khz-96kbitrate-mono-mp3",
+            outputFormat: "audio-24khz-48kbitrate-mono-mp3",
           },
         },
       },
     });
-    ws.send(`X-Timestamp:${new Date().toISOString()}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`);
+    ws.send(
+      `X-Timestamp:${Date()}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`,
+      { compress: true }
+    );
 
     const ssmlBody = escapeSSML(trimmed);
     ws.send(
       `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
-      `X-Timestamp:${new Date().toISOString()}\r\nPath:ssml\r\n\r\n` +
+      `X-Timestamp:${Date()}Z\r\nPath:ssml\r\n\r\n` +
       `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${xmlLang}'>` +
       `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rateStr}' volume='+0%'>` +
-      `${ssmlBody}</prosody></voice></speak>`
+      `${ssmlBody}</prosody></voice></speak>`,
+      { compress: true }
     );
   });
 
