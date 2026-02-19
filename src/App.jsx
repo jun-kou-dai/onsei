@@ -6,7 +6,197 @@ import { useState, useRef, useEffect } from "react";
    No async, no setTimeout, no indirection.
    ================================================ */
 
+// --- Client-side Edge TTS (direct WebSocket to Bing, no server proxy) ---
+const EDGE_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+const EDGE_CHROMIUM = "143.0.3650.75";
+const EDGE_GEC_VER = `1-${EDGE_CHROMIUM}`;
 
+async function edgeComputeGEC() {
+  const WIN_EPOCH = 116444736000000000n;
+  const ticks = BigInt(Math.round(Date.now() / 1000)) * 10000000n + WIN_EPOCH;
+  const FIVE_MIN = 3000000000n;
+  const rounded = ticks - (ticks % FIVE_MIN);
+  const input = `${rounded}${EDGE_TOKEN}`;
+  const data = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
+function edgeDateString() {
+  const d = new Date();
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${days[d.getUTCDay()]} ${months[d.getUTCMonth()]} ${pad(d.getUTCDate())} ${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} GMT+0000 (Coordinated Universal Time)`;
+}
+
+function edgeEscapeSSML(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Client-side Edge TTS: returns a Promise<Blob> of audio/mpeg
+// Connects directly from the user's browser → no cloud IP throttling
+async function edgeTTSClient(text, voice, rate, timeoutMs = 20000) {
+  const connId = crypto.randomUUID().replaceAll("-", "");
+  const gec = await edgeComputeGEC();
+  const wsUrl = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${EDGE_TOKEN}&Sec-MS-GEC=${gec}&Sec-MS-GEC-Version=${EDGE_GEC_VER}&ConnectionId=${connId}`;
+
+  const ratePercent = Math.round(((rate || 1.0) - 1.0) * 100);
+  const rateStr = ratePercent >= 0 ? `+${ratePercent}%` : `${ratePercent}%`;
+  const voiceName = voice || "ja-JP-NanamiNeural";
+  const langMatch = voiceName.match(/^([a-z]{2}-[A-Z]{2})/);
+  const xmlLang = langMatch ? langMatch[1] : "ja-JP";
+  const ssmlBody = edgeEscapeSSML(text.slice(0, 5000));
+
+  return new Promise((resolve, reject) => {
+    const audioChunks = [];
+    const ws = new WebSocket(wsUrl);
+    let done = false;
+
+    const timer = setTimeout(() => {
+      if (!done) { done = true; ws.close(); reject(new Error("timeout")); }
+    }, timeoutMs);
+
+    ws.onopen = () => {
+      const ts = edgeDateString();
+      const config = JSON.stringify({
+        context: {
+          synthesis: {
+            audio: {
+              metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false },
+              outputFormat: "audio-24khz-96kbitrate-mono-mp3",
+            },
+          },
+        },
+      });
+      ws.send(`X-Timestamp:${ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`);
+      ws.send(
+        `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
+        `X-Timestamp:${ts}Z\r\nPath:ssml\r\n\r\n` +
+        `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${xmlLang}'>` +
+        `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rateStr}' volume='+0%'>` +
+        `${ssmlBody}</prosody></voice></speak>`
+      );
+    };
+
+    ws.onmessage = async (evt) => {
+      if (done) return;
+      if (typeof evt.data === "string") {
+        if (evt.data.includes("turn.end")) {
+          done = true; clearTimeout(timer); ws.close();
+          if (audioChunks.length > 0) {
+            resolve(new Blob(audioChunks, { type: "audio/mpeg" }));
+          } else {
+            reject(new Error("no audio"));
+          }
+        }
+        return;
+      }
+      // Binary message — extract audio after "Path:audio\r\n"
+      const buf = evt.data instanceof Blob ? await evt.data.arrayBuffer() : evt.data;
+      const bytes = new Uint8Array(buf);
+      const sep = new TextEncoder().encode("Path:audio\r\n");
+      let idx = -1;
+      outer: for (let i = 0; i <= bytes.length - sep.length; i++) {
+        for (let j = 0; j < sep.length; j++) {
+          if (bytes[i + j] !== sep[j]) continue outer;
+        }
+        idx = i + sep.length;
+        break;
+      }
+      if (idx >= 0) {
+        audioChunks.push(bytes.slice(idx));
+      }
+    };
+
+    ws.onerror = () => {
+      if (!done) { done = true; clearTimeout(timer); reject(new Error("ws error")); }
+    };
+    ws.onclose = () => {
+      if (!done) { done = true; clearTimeout(timer); reject(new Error("ws closed")); }
+    };
+  });
+}
+
+// Client-side Edge TTS with streaming: calls onAudioChunk for each piece of audio data
+// Returns a Promise that resolves when all audio is received
+async function edgeTTSClientStream(text, voice, rate, onAudioChunk, timeoutMs = 25000) {
+  const connId = crypto.randomUUID().replaceAll("-", "");
+  const gec = await edgeComputeGEC();
+  const wsUrl = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${EDGE_TOKEN}&Sec-MS-GEC=${gec}&Sec-MS-GEC-Version=${EDGE_GEC_VER}&ConnectionId=${connId}`;
+
+  const ratePercent = Math.round(((rate || 1.0) - 1.0) * 100);
+  const rateStr = ratePercent >= 0 ? `+${ratePercent}%` : `${ratePercent}%`;
+  const voiceName = voice || "ja-JP-NanamiNeural";
+  const langMatch = voiceName.match(/^([a-z]{2}-[A-Z]{2})/);
+  const xmlLang = langMatch ? langMatch[1] : "ja-JP";
+  const ssmlBody = edgeEscapeSSML(text.slice(0, 5000));
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    let done = false;
+    let hasAudio = false;
+
+    const timer = setTimeout(() => {
+      if (!done) { done = true; ws.close(); reject(new Error("timeout")); }
+    }, timeoutMs);
+
+    ws.onopen = () => {
+      const ts = edgeDateString();
+      const config = JSON.stringify({
+        context: {
+          synthesis: {
+            audio: {
+              metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false },
+              outputFormat: "audio-24khz-96kbitrate-mono-mp3",
+            },
+          },
+        },
+      });
+      ws.send(`X-Timestamp:${ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`);
+      ws.send(
+        `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
+        `X-Timestamp:${ts}Z\r\nPath:ssml\r\n\r\n` +
+        `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${xmlLang}'>` +
+        `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rateStr}' volume='+0%'>` +
+        `${ssmlBody}</prosody></voice></speak>`
+      );
+    };
+
+    ws.onmessage = async (evt) => {
+      if (done) return;
+      if (typeof evt.data === "string") {
+        if (evt.data.includes("turn.end")) {
+          done = true; clearTimeout(timer); ws.close();
+          resolve(hasAudio);
+        }
+        return;
+      }
+      const buf = evt.data instanceof Blob ? await evt.data.arrayBuffer() : evt.data;
+      const bytes = new Uint8Array(buf);
+      const sep = new TextEncoder().encode("Path:audio\r\n");
+      let idx = -1;
+      outer: for (let i = 0; i <= bytes.length - sep.length; i++) {
+        for (let j = 0; j < sep.length; j++) {
+          if (bytes[i + j] !== sep[j]) continue outer;
+        }
+        idx = i + sep.length;
+        break;
+      }
+      if (idx >= 0) {
+        hasAudio = true;
+        onAudioChunk(bytes.slice(idx));
+      }
+    };
+
+    ws.onerror = () => {
+      if (!done) { done = true; clearTimeout(timer); reject(new Error("ws error")); }
+    };
+    ws.onclose = () => {
+      if (!done) { done = true; clearTimeout(timer); reject(new Error("ws closed")); }
+    };
+  });
+}
 
 // --- File readers ---
 const readBuf = (f) => new Promise((r, j) => { const x = new FileReader(); x.onload = () => r(x.result); x.onerror = j; x.readAsArrayBuffer(f); });
@@ -950,28 +1140,14 @@ export default function EarFlow() {
     }
   };
 
-  // --- Edge TTS audio preloader (background fetch, no UI) ---
+  // --- Edge TTS audio preloader (background, client-side WebSocket) ---
   const preloadEdgeAudio = (itemId, text) => {
     const v = edgeVoiceRef.current;
     const r = currentRateRef.current || 1.0;
     const key = `${itemId}_${v}_${r}`;
     if (audioCacheRef.current.has(key)) return;
-    const chunks = splitTextSmart(text, 5000);
-    Promise.all(chunks.map(chunk => {
-      const c = new AbortController();
-      const t = setTimeout(() => c.abort(), 8000);
-      return fetch("/api/edge-tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: chunk, voice: v, rate: r }),
-        signal: c.signal,
-      }).then(r => { clearTimeout(t); return r.ok ? r.blob() : null; }).catch(() => { clearTimeout(t); return null; });
-    })).then(blobs => {
-      const valid = blobs.filter(b => b);
-      if (valid.length > 0) {
-        const combined = new Blob(valid, { type: "audio/mpeg" });
-        if (combined.size >= 100) cacheSet(key, combined);
-      }
+    edgeTTSClient(text, v, r).then(blob => {
+      if (blob && blob.size >= 100) cacheSet(key, blob);
     }).catch(() => {});
   };
 
@@ -1040,10 +1216,8 @@ export default function EarFlow() {
         return;
       }
 
-      // 2. No cache — fetch with streaming playback via MediaSource
+      // 2. No cache — client-side WebSocket direct to Bing (no server proxy)
       flash("音声生成中...");
-
-      const chunks = splitTextSmart(text, 5000);
 
       // Helper: fallback to browser TTS
       const fallbackToBrowser = (reason) => {
@@ -1055,141 +1229,80 @@ export default function EarFlow() {
         speakChunk(0, rateVal);
       };
 
-      // For single chunk + MediaSource support: stream and play immediately
-      if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
-        let fetchRes;
+      // Streaming playback via MediaSource (client-side WebSocket)
+      if (window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
         const _t0 = performance.now();
         try {
-          const controller = new AbortController();
-          const raceTimer = setTimeout(() => controller.abort(), 20000);
-          fetchRes = await fetch("/api/edge-tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: chunks[0], voice: voice, rate: rateVal ?? 1.0 }),
-            signal: controller.signal,
-          });
-          clearTimeout(raceTimer);
-        } catch {
-          if (playIdRef.current !== myPlayId) return;
-          fallbackToBrowser(`応答なし (${Math.round(performance.now()-_t0)}ms)`);
-          return;
-        }
-        const _elapsed = Math.round(performance.now()-_t0);
-        const _wsMs = fetchRes.headers.get("X-Timing-WsConnect");
-        const _audioMs = fetchRes.headers.get("X-Timing-FirstAudio");
-        console.log(`[TTS] fetch=${_elapsed}ms | server: ws=${_wsMs} firstAudio=${_audioMs}`);
-        if (!fetchRes.ok) {
-          if (playIdRef.current !== myPlayId) return;
-          fallbackToBrowser(`エラー (${_elapsed}ms)`);
-          return;
-        }
-        if (playIdRef.current !== myPlayId) return;
+          const ms = new MediaSource();
+          const msUrl = URL.createObjectURL(ms);
+          if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
+          const audio = new Audio();
+          audioRef.current = audio;
+          audio.src = msUrl;
+          audio.playbackRate = 1.0;
+          audio.volume = 1.0;
+          setupEdgeAudio(audio, msUrl, rateVal);
 
-        const ms = new MediaSource();
-        const msUrl = URL.createObjectURL(ms);
-        if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
-        const audio = new Audio();
-        audioRef.current = audio;
-        audio.src = msUrl;
-        audio.playbackRate = 1.0; // Edge TTS handles rate via SSML; don't double-apply
-        audio.volume = 1.0;
-        setupEdgeAudio(audio, msUrl, rateVal);
-
-        // Stream audio with 5s data-receive timeout → fallback to browser TTS
-        let streamFallback = false;
-        await new Promise((resolve) => {
-          ms.addEventListener("sourceopen", async () => {
-            try {
-              const sb = ms.addSourceBuffer("audio/mpeg");
-              const reader = fetchRes.body.getReader();
-              let started = false;
-
-              // 5s timeout: if no audio data chunk arrives, cancel and fallback
-              let dataTimer = setTimeout(() => {
-                streamFallback = true;
-                reader.cancel();
-              }, 5000);
-
-              while (true) {
-                const { done, value } = await reader.read();
-                clearTimeout(dataTimer);
-                if (streamFallback) break;
-                if (playIdRef.current !== myPlayId) { reader.cancel(); resolve(); return; }
-                if (done) break;
-
-                // Reset timeout for next chunk
-                dataTimer = setTimeout(() => {
-                  streamFallback = true;
-                  reader.cancel();
-                }, 5000);
-
-                if (sb.updating)
-                  await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
-                sb.appendBuffer(value);
-
-                // Start playback after first chunk appended
-                if (!started) {
-                  await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
-                  audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
-                  started = true;
-                }
-              }
-
-              clearTimeout(dataTimer);
-              if (!streamFallback) {
+          let started = false;
+          await new Promise((resolve, reject) => {
+            ms.addEventListener("sourceopen", async () => {
+              try {
+                const sb = ms.addSourceBuffer("audio/mpeg");
+                await edgeTTSClientStream(text, voice, rateVal ?? 1.0, (chunk) => {
+                  if (playIdRef.current !== myPlayId) return;
+                  const appendChunk = () => {
+                    if (sb.updating) {
+                      sb.addEventListener("updateend", appendChunk, { once: true });
+                      return;
+                    }
+                    sb.appendBuffer(chunk);
+                    if (!started) {
+                      started = true;
+                      sb.addEventListener("updateend", () => {
+                        audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+                      }, { once: true });
+                    }
+                  };
+                  appendChunk();
+                });
+                // Wait for all pending appends to finish
                 if (sb.updating)
                   await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
                 if (ms.readyState === "open") ms.endOfStream();
+              } catch (err) {
+                try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
+                reject(err);
+                return;
               }
-            } catch {
-              try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
-            }
-            resolve();
+              resolve();
+            });
           });
-        });
-        if (streamFallback) {
-          // Clean up failed audio element
-          audio.pause(); audio.src = ""; URL.revokeObjectURL(msUrl);
+          console.log(`[TTS] client-side stream done in ${Math.round(performance.now()-_t0)}ms`);
+        } catch (err) {
           if (playIdRef.current !== myPlayId) return;
-          const totalWait = Math.round(performance.now() - _t0);
-          fallbackToBrowser(`ストリーム遅延 (${totalWait}ms)`);
+          console.warn("[TTS] client-side stream failed:", err.message);
+          fallbackToBrowser(`${err.message} (${Math.round(performance.now()-_t0)}ms)`);
         }
         return;
       }
 
-      // 3. Multi-chunk or no MediaSource — parallel fetch, 8s timeout per chunk
-      const blobResults = await Promise.all(chunks.map(chunk => {
-        const c = new AbortController();
-        const t = setTimeout(() => c.abort(), 20000);
-        return fetch("/api/edge-tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: chunk, voice: voice, rate: rateVal ?? 1.0 }),
-          signal: c.signal,
-        }).then(async r => { clearTimeout(t); return r.ok ? r.blob() : null; }).catch(() => { clearTimeout(t); return null; });
-      }));
-      const blobs = blobResults.filter(b => b && b.size >= 100);
-      if (blobs.length === 0) {
+      // Fallback: no MediaSource — get full blob via client-side WebSocket
+      try {
+        const blob = await edgeTTSClient(text, voice, rateVal ?? 1.0);
         if (playIdRef.current !== myPlayId) return;
-        fallbackToBrowser("全チャンク失敗");
-        return;
+        if (blob.size < 100) { fallbackToBrowser("音声データなし"); return; }
+        const url = URL.createObjectURL(blob);
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.playbackRate = 1.0;
+        audio.volume = 1.0;
+        setupEdgeAudio(audio, url, rateVal);
+        audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+      } catch (err) {
+        if (playIdRef.current !== myPlayId) return;
+        fallbackToBrowser(err.message);
       }
-      if (blobs.length < chunks.length) {
-        flash(`⚠ ${chunks.length - blobs.length}チャンクをスキップ`);
-      }
-      if (playIdRef.current !== myPlayId) return;
-
-      const combined = new Blob(blobs, { type: "audio/mpeg" });
-      if (combined.size < 100) { flash("⚠ 音声データが空です"); setSpeaking(false); return; }
-
-      const url = URL.createObjectURL(combined);
-      if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
-      const audio = new Audio(url);
-      audioRef.current = audio;
-      audio.playbackRate = 1.0; // Edge TTS handles rate via SSML
-      audio.volume = 1.0;
-      setupEdgeAudio(audio, url, rateVal);
-      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
     } catch (e) {
       flash("⚠ " + e.message);
       setSpeaking(false);
