@@ -676,6 +676,8 @@ export default function EarFlow() {
 
       let res;
       try {
+        const elCtrl = new AbortController();
+        const elTimer = setTimeout(() => elCtrl.abort(), 55000);
         res = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -686,7 +688,9 @@ export default function EarFlow() {
             modelId: "eleven_multilingual_v2",
             voiceSettings: { stability: 0.5, similarity_boost: 0.75 },
           }),
+          signal: elCtrl.signal,
         });
+        clearTimeout(elTimer);
       } catch (fetchErr) {
         flash("⚠ ネットワークエラー: サーバーに接続できません");
         setSpeaking(false);
@@ -829,6 +833,8 @@ export default function EarFlow() {
 
         let res;
         try {
+          const oaiCtrl = new AbortController();
+          const oaiTimer = setTimeout(() => oaiCtrl.abort(), 55000);
           res = await fetch("/api/openai-tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -838,7 +844,9 @@ export default function EarFlow() {
               voice: oaiVoice,
               model: oaiModel,
             }),
+            signal: oaiCtrl.signal,
           });
+          clearTimeout(oaiTimer);
         } catch (fetchErr) {
           flash("⚠ ネットワークエラー: サーバーに接続できません");
           setSpeaking(false);

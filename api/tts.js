@@ -8,9 +8,13 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing apiKey, voiceId, or text" });
   }
 
+  let headersSent = false;
+
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    // Keep timer running for the ENTIRE operation (not just headers)
+    const timer = setTimeout(() => controller.abort(), 55000);
+
     const elRes = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
       {
@@ -27,9 +31,9 @@ export default async function handler(req, res) {
         signal: controller.signal,
       }
     );
-    clearTimeout(timer);
 
     if (!elRes.ok) {
+      clearTimeout(timer);
       const errBody = await elRes.text().catch(() => "");
       let errJson;
       try { errJson = JSON.parse(errBody); } catch { errJson = errBody; }
@@ -40,13 +44,26 @@ export default async function handler(req, res) {
       });
     }
 
-    const arrayBuf = await elRes.arrayBuffer();
+    // Stream response directly — don't buffer entire audio in memory
     const contentType = elRes.headers.get("content-type") || "audio/mpeg";
+    res.writeHead(200, { "Content-Type": contentType });
+    headersSent = true;
 
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Content-Length", arrayBuf.byteLength);
-    return res.status(200).send(Buffer.from(arrayBuf));
+    const reader = elRes.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    clearTimeout(timer);
+    res.end();
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    if (!headersSent) {
+      if (e.name === "AbortError") {
+        return res.status(504).json({ error: "Timeout: TTS generation took too long" });
+      }
+      return res.status(500).json({ error: e.message });
+    }
+    try { res.end(); } catch {}
   }
 }

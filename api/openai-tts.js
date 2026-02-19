@@ -8,12 +8,14 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing apiKey or text" });
   }
 
-  // OpenAI TTS has a 4096 character limit per request
   const trimmed = text.slice(0, 4096);
+  let headersSent = false;
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    // Keep timer running for the ENTIRE operation (not just headers)
+    const timer = setTimeout(() => controller.abort(), 55000);
+
     const oaiRes = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
@@ -28,9 +30,9 @@ export default async function handler(req, res) {
       }),
       signal: controller.signal,
     });
-    clearTimeout(timer);
 
     if (!oaiRes.ok) {
+      clearTimeout(timer);
       const errBody = await oaiRes.text().catch(() => "");
       let errJson;
       try { errJson = JSON.parse(errBody); } catch { errJson = errBody; }
@@ -41,11 +43,25 @@ export default async function handler(req, res) {
       });
     }
 
-    const arrayBuf = await oaiRes.arrayBuffer();
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Content-Length", arrayBuf.byteLength);
-    return res.status(200).send(Buffer.from(arrayBuf));
+    // Stream response directly — don't buffer entire audio in memory
+    res.writeHead(200, { "Content-Type": "audio/mpeg" });
+    headersSent = true;
+
+    const reader = oaiRes.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    clearTimeout(timer);
+    res.end();
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    if (!headersSent) {
+      if (e.name === "AbortError") {
+        return res.status(504).json({ error: "Timeout: TTS generation took too long" });
+      }
+      return res.status(500).json({ error: e.message });
+    }
+    try { res.end(); } catch {}
   }
 }
