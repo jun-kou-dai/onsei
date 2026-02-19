@@ -962,7 +962,7 @@ export default function EarFlow() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: chunk, voice: v, rate: r }),
-      }).then(r => r.ok ? r.blob() : null).catch(() => null)
+      }, 0).then(r => r.ok ? r.blob() : null).catch(() => null)
     )).then(blobs => {
       const valid = blobs.filter(b => b);
       if (valid.length > 0) {
@@ -1050,9 +1050,9 @@ export default function EarFlow() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: chunks[0], voice: voice, rate: rateVal ?? 1.0 }),
-          });
+          }, 0);
         } catch {
-          flash("⚠ ネットワークエラー（リトライ失敗）"); setSpeaking(false); return;
+          flash("⚠ ネットワークエラー"); setSpeaking(false); return;
         }
         if (!fetchRes.ok) {
           flash("⚠ 音声生成エラー: " + (await fetchRes.text().catch(() => "")).slice(0, 100));
@@ -1116,11 +1116,11 @@ export default function EarFlow() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: chunk, voice: voice, rate: rateVal ?? 1.0 }),
-        }).then(async r => r.ok ? r.blob() : null).catch(() => null)
+        }, 0).then(async r => r.ok ? r.blob() : null).catch(() => null)
       ));
       const blobs = blobResults.filter(b => b && b.size >= 100);
       if (blobs.length === 0) {
-        flash("⚠ 音声生成に失敗しました（リトライ済み）");
+        flash("⚠ 音声生成に失敗しました");
         setSpeaking(false); return;
       }
       if (blobs.length < chunks.length) {

@@ -53,7 +53,7 @@ export default function handler(req, res) {
     }
   };
 
-  const timer = setTimeout(() => finish("TTS timeout (15s)"), 15000);
+  const timer = setTimeout(() => finish("TTS timeout (25s)"), 25000);
 
   // Abort if client disconnects
   req.on("close", () => finish("Client disconnected"));
@@ -69,19 +69,18 @@ export default function handler(req, res) {
         },
       },
     });
+    const ts = new Date().toISOString();
     ws.send(
-      `X-Timestamp:${Date()}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`,
-      { compress: true }
+      `X-Timestamp:${ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n${config}`
     );
 
     const ssmlBody = escapeSSML(trimmed);
     ws.send(
       `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
-      `X-Timestamp:${Date()}Z\r\nPath:ssml\r\n\r\n` +
+      `X-Timestamp:${ts}\r\nPath:ssml\r\n\r\n` +
       `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${xmlLang}'>` +
       `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rateStr}' volume='+0%'>` +
-      `${ssmlBody}</prosody></voice></speak>`,
-      { compress: true }
+      `${ssmlBody}</prosody></voice></speak>`
     );
   });
 
