@@ -1045,6 +1045,7 @@ export default function EarFlow() {
       // For single chunk + MediaSource support: stream and play immediately
       if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
         let fetchRes;
+        const _t0 = performance.now();
         try {
           fetchRes = await fetchWithRetry("/api/edge-tts", {
             method: "POST",
@@ -1052,10 +1053,17 @@ export default function EarFlow() {
             body: JSON.stringify({ text: chunks[0], voice: voice, rate: rateVal ?? 1.0 }),
           }, 0);
         } catch {
+          console.warn(`[TTS] fetch failed after ${Math.round(performance.now()-_t0)}ms`);
           flash("⚠ ネットワークエラー"); setSpeaking(false); return;
         }
+        const _elapsed = Math.round(performance.now()-_t0);
+        const _wsMs = fetchRes.headers.get("X-Timing-WsConnect");
+        const _audioMs = fetchRes.headers.get("X-Timing-FirstAudio");
+        console.log(`[TTS] fetch=${_elapsed}ms | server: ws=${_wsMs} firstAudio=${_audioMs}`);
         if (!fetchRes.ok) {
-          flash("⚠ 音声生成エラー: " + (await fetchRes.text().catch(() => "")).slice(0, 100));
+          const errBody = await fetchRes.text().catch(() => "");
+          console.warn(`[TTS] error response:`, errBody);
+          flash("⚠ 音声生成エラー: " + errBody.slice(0, 100));
           setSpeaking(false); return;
         }
         if (playIdRef.current !== myPlayId) return;

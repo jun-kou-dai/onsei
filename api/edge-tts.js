@@ -22,6 +22,8 @@ function escapeSSML(text) {
 
 // Streaming handler: pipes WebSocket audio chunks directly to HTTP response
 export default function handler(req, res) {
+  const t0 = Date.now();
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -44,6 +46,8 @@ export default function handler(req, res) {
 
   let headersSent = false;
   let finished = false;
+  // Timing milestones
+  const timing = { wsConnect: 0, firstAudio: 0, done: 0 };
 
   const ws = new WebSocket(wsUrl, {
     host: "speech.platform.bing.com",
@@ -56,10 +60,14 @@ export default function handler(req, res) {
   const finish = (errMsg) => {
     if (finished) return;
     finished = true;
+    timing.done = Date.now() - t0;
     clearTimeout(timer);
     try { ws.close(); } catch {}
     if (!headersSent) {
-      res.status(500).json({ error: errMsg || "No audio generated" });
+      res.status(500).json({
+        error: errMsg || "No audio generated",
+        timing_ms: timing,
+      });
     } else {
       try { res.end(); } catch {}
     }
@@ -71,6 +79,8 @@ export default function handler(req, res) {
   req.on("close", () => finish("Client disconnected"));
 
   ws.on("open", () => {
+    timing.wsConnect = Date.now() - t0;
+
     const config = JSON.stringify({
       context: {
         synthesis: {
@@ -104,7 +114,12 @@ export default function handler(req, res) {
     const idx = data.indexOf(sep);
     if (idx >= 0) {
       if (!headersSent) {
-        res.writeHead(200, { "Content-Type": "audio/mpeg" });
+        timing.firstAudio = Date.now() - t0;
+        res.writeHead(200, {
+          "Content-Type": "audio/mpeg",
+          "X-Timing-WsConnect": `${timing.wsConnect}ms`,
+          "X-Timing-FirstAudio": `${timing.firstAudio}ms`,
+        });
         headersSent = true;
       }
       res.write(data.subarray(idx + sep.length));
