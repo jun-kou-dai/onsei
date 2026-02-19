@@ -57,17 +57,21 @@ function cleanTextForTTS(text) {
   return t.trim();
 }
 
-// Fetch with automatic retry (exponential backoff)
-async function fetchWithRetry(url, options, retries = 2) {
+// Fetch with automatic retry (exponential backoff) and per-request timeout
+async function fetchWithRetry(url, options, retries = 2, timeoutMs = 20000) {
   for (let i = 0; i <= retries; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timer);
       if (res.ok || res.status === 400) return res; // 400 = bad input, don't retry
-      if (i < retries) { await new Promise(r => setTimeout(r, 1000 * (i + 1))); continue; }
+      if (i < retries) { await new Promise(r => setTimeout(r, 800 * (i + 1))); continue; }
       return res;
     } catch (err) {
+      clearTimeout(timer);
       if (i >= retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      await new Promise(r => setTimeout(r, 800 * (i + 1)));
     }
   }
 }
@@ -274,6 +278,9 @@ export default function EarFlow() {
   const pendingResumeRef = useRef(null);
   const seekAfterLoadRef = useRef(0);
 
+  // Guard: skip edgeVoice useEffect when voice change comes from handlePlay
+  const voiceChangeFromPlayRef = useRef(false);
+
   // --- ElevenLabs state (persisted to localStorage) ---
   const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "edge"));
   const [elApiKey, setElApiKeyRaw] = useState(() => lsGet("elApiKey", ""));
@@ -406,6 +413,11 @@ export default function EarFlow() {
 
   // Restart playback when edge voice changes mid-play
   useEffect(() => {
+    // Skip if voice change originated from handlePlay (it already called edgeSpeak)
+    if (voiceChangeFromPlayRef.current) {
+      voiceChangeFromPlayRef.current = false;
+      return;
+    }
     if (speaking && ttsEngine === "edge" && activeIdx >= 0) {
       const item = queue[activeIdx];
       if (item?.text) {
@@ -934,14 +946,15 @@ export default function EarFlow() {
   // --- Edge TTS audio preloader (background fetch, no UI) ---
   const preloadEdgeAudio = (itemId, text) => {
     const v = edgeVoiceRef.current;
-    const key = `${itemId}_${v}_${rate ?? 1.0}`;
+    const r = currentRateRef.current || 1.0;
+    const key = `${itemId}_${v}_${r}`;
     if (audioCacheRef.current.has(key)) return;
     const chunks = splitTextSmart(text, 5000);
     Promise.all(chunks.map(chunk =>
       fetchWithRetry("/api/edge-tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: chunk, voice: v, rate: rate ?? 1.0 }),
+        body: JSON.stringify({ text: chunk, voice: v, rate: r }),
       }).then(r => r.ok ? r.blob() : null).catch(() => null)
     )).then(blobs => {
       const valid = blobs.filter(b => b);
@@ -1351,6 +1364,7 @@ export default function EarFlow() {
           const targetGroup = EDGE_VOICE_GROUPS.find(g => g.lang === itemLang);
           if (targetGroup && targetGroup.voices.length > 0) {
             const autoVoice = targetGroup.voices[0].id;
+            voiceChangeFromPlayRef.current = true; // prevent useEffect double-call
             setEdgeVoice(autoVoice);
             flash(`🔄 音声を${targetGroup.label}に自動切替`);
           }
@@ -1520,11 +1534,15 @@ export default function EarFlow() {
     flash("🌐 翻訳中...");
     setQueue(q => q.map(it => it.id === itemId ? { ...it, _translating: true } : it));
     try {
+      const translateCtrl = new AbortController();
+      const translateTimer = setTimeout(() => translateCtrl.abort(), 60000); // 60s for long texts
       const res = await fetch("/api/translate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apiKey: apiKey.trim(), text: item.text, sourceLang: srcLang, targetLang: "ja" }),
+        signal: translateCtrl.signal,
       });
+      clearTimeout(translateTimer);
       const data = await res.json();
       if (!res.ok || !data.ok) {
         flash("⚠ 翻訳エラー: " + (data.error || data.detail?.error?.message || "失敗"));
@@ -1614,11 +1632,15 @@ export default function EarFlow() {
     setUrlLoading(true);
     flash("🌐 記事を取得中...");
     try {
+      const urlCtrl = new AbortController();
+      const urlTimer = setTimeout(() => urlCtrl.abort(), 20000);
       const res = await fetch("/api/extract-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
+        signal: urlCtrl.signal,
       });
+      clearTimeout(urlTimer);
       const data = await res.json();
       if (!res.ok || !data.ok) {
         flash("⚠ " + (data.error || "記事の取得に失敗しました"));
@@ -1627,8 +1649,9 @@ export default function EarFlow() {
       }
       const urlLang = detectLanguage(data.text);
       addItem(data.text, data.title || data.source, "url", 0, urlLang);
+      const chars = (data.charCount || data.text?.length || 0).toLocaleString();
       const langHint = urlLang !== "ja" ? " — 「訳」ボタンで日本語に翻訳できます" : "";
-      flash(`✓ ${data.source} から ${data.charCount.toLocaleString()}字を取得${langHint}`);
+      flash(`✓ ${data.source} から ${chars}字を取得${langHint}`);
       setInputUrl("");
     } catch (e) {
       flash("⚠ ネットワークエラー: " + e.message);

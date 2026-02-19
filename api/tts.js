@@ -9,6 +9,8 @@ export default async function handler(req, res) {
   }
 
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
     const elRes = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
       {
@@ -22,8 +24,10 @@ export default async function handler(req, res) {
           model_id: modelId || "eleven_multilingual_v2",
           voice_settings: voiceSettings || { stability: 0.5, similarity_boost: 0.75 },
         }),
+        signal: controller.signal,
       }
     );
+    clearTimeout(timer);
 
     if (!elRes.ok) {
       const errBody = await elRes.text().catch(() => "");

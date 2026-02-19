@@ -12,6 +12,8 @@ export default async function handler(req, res) {
   const trimmed = text.slice(0, 4096);
 
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
     const oaiRes = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
@@ -24,7 +26,9 @@ export default async function handler(req, res) {
         voice: voice || "nova",
         response_format: "mp3",
       }),
+      signal: controller.signal,
     });
+    clearTimeout(timer);
 
     if (!oaiRes.ok) {
       const errBody = await oaiRes.text().catch(() => "");

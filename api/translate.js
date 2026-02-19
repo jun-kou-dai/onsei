@@ -29,6 +29,8 @@ export default async function handler(req, res) {
     const translated = [];
 
     for (const chunk of chunks) {
+      const controller = new AbortController();
+      const chunkTimer = setTimeout(() => controller.abort(), 30000);
       const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -46,7 +48,9 @@ export default async function handler(req, res) {
           ],
           temperature: 0.3,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(chunkTimer);
 
       if (!oaiRes.ok) {
         const errBody = await oaiRes.text().catch(() => "");

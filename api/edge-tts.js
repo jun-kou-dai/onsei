@@ -66,7 +66,7 @@ export default function handler(req, res) {
     }
   };
 
-  const timer = setTimeout(() => finish("TTS timeout (30s)"), 30000);
+  const timer = setTimeout(() => finish("TTS timeout (15s)"), 15000);
 
   // Abort if client disconnects
   req.on("close", () => finish("Client disconnected"));
