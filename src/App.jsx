@@ -1903,7 +1903,13 @@ export default function EarFlow() {
       clearTimeout(translateTimer);
       const data = await res.json();
       if (!res.ok || !data.ok) {
-        flash("⚠ 翻訳エラー: " + (data.error || data.detail?.error?.message || "失敗"));
+        const raw = data.error || data.detail?.error?.message || "";
+        let msg = "翻訳に失敗しました";
+        if (res.status === 401 || /invalid.*key|auth/i.test(raw)) msg = "APIキーが無効です。設定を確認してください";
+        else if (res.status === 429 || /rate.?limit|quota/i.test(raw)) msg = "レート制限中です。少し待ってから再試行してください";
+        else if (res.status === 504 || /timeout/i.test(raw)) msg = "タイムアウト。テキストが長すぎる可能性があります";
+        else if (raw) msg = raw.slice(0, 100);
+        flash("⚠ " + msg);
         setQueue(q => q.map(it => it.id === itemId ? { ...it, _translating: false } : it));
         return;
       }
@@ -2001,7 +2007,12 @@ export default function EarFlow() {
       clearTimeout(urlTimer);
       const data = await res.json();
       if (!res.ok || !data.ok) {
-        flash("⚠ " + (data.error || "記事の取得に失敗しました"));
+        const raw = data.error || "";
+        let urlMsg = "記事の取得に失敗しました";
+        if (/extract|meaningful/i.test(raw)) urlMsg = "このサイトからテキストを抽出できません。手動コピーをお試しください";
+        else if (/block|forbidden|403/i.test(raw)) urlMsg = "このサイトはアクセスをブロックしています。手動コピーをお試しください";
+        else if (raw) urlMsg = raw.slice(0, 100);
+        flash("⚠ " + urlMsg);
         setUrlLoading(false);
         return;
       }
@@ -2012,7 +2023,8 @@ export default function EarFlow() {
       flash(`✓ ${data.source} から ${chars}字を取得${langHint}`);
       setInputUrl("");
     } catch (e) {
-      flash("⚠ ネットワークエラー: " + e.message);
+      if (e.name === "AbortError") flash("⚠ タイムアウト。URLが応答しないか、ページが大きすぎます");
+      else flash("⚠ ネットワークエラー。インターネット接続を確認してください");
     }
     setUrlLoading(false);
   };
@@ -2536,16 +2548,22 @@ export default function EarFlow() {
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <span style={{ fontSize: 12, color: "#666" }}>キュー {queue.length}件{queue.length > 0 && (() => {
-                const totalChars = queue.reduce((sum, item) => sum + (item.charCount || 0), 0);
-                const est = formatEstimatedTime(totalChars, rate);
-                return est ? <span style={{ color: "#50dcb4", marginLeft: 6 }}>合計 {est}</span> : null;
+                const totalMin = queue.reduce((sum, item) => {
+                  const base = CHARS_PER_MIN[item.lang] || CHARS_PER_MIN.ja;
+                  return sum + (item.charCount || 0) / (base * rate);
+                }, 0);
+                const rounded = Math.round(totalMin);
+                if (rounded < 1) return <span style={{ color: "#50dcb4", marginLeft: 6 }}>合計 1分未満</span>;
+                if (rounded < 60) return <span style={{ color: "#50dcb4", marginLeft: 6 }}>合計 約{rounded}分</span>;
+                const h = Math.floor(rounded / 60); const m = rounded % 60;
+                return <span style={{ color: "#50dcb4", marginLeft: 6 }}>合計 約{h}時間{m > 0 ? `${m}分` : ""}</span>;
               })()}</span>
               <button onClick={() => { if (queue.length <= 1 || window.confirm(`${queue.length}件のアイテムをすべて削除しますか？`)) { handleStop(); setQueue([]); lsSet("session", null); } }} style={S.smBtn("transparent", "#555")}>クリア</button>
             </div>
 
             {queue.map((item, i) => {
               const isActive = i === activeIdx;
-              const estTime = formatEstimatedTime(item.charCount, rate);
+              const estTime = formatEstimatedTime(item.charCount, rate, item.lang);
               const itemLang = item.lang || "ja";
               const langColors = { en: "#f59e0b", zh: "#ef4444", ko: "#a78bfa", ja: "#60a5fa" };
               const langLabels = { en: "EN", zh: "ZH", ko: "KO", ja: "JA" };
@@ -2578,7 +2596,7 @@ export default function EarFlow() {
                         )}
                       </div>
                       {/* Title */}
-                      <div style={{ fontSize: 14, color: "#ddd", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <div title={item.title} style={{ fontSize: 14, color: "#ddd", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {item.title}
                       </div>
                       {/* Preview */}
@@ -2590,10 +2608,11 @@ export default function EarFlow() {
                     {/* Actions */}
                     <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
                       {canTranslate && (
-                        <button onClick={() => translateItem(i)} title="日本語に翻訳" style={{
+                        <button onClick={() => oaiApiKey ? translateItem(i) : flash("⚠ 翻訳にはOpenAI APIキーが必要です。⚙設定から入力してください")} title={oaiApiKey ? "日本語に翻訳" : "翻訳にはOpenAI APIキーが必要です"} style={{
                           width: 34, height: 34, borderRadius: 8,
-                          background: "transparent", border: "1px solid rgba(245,158,11,0.3)",
-                          color: "#f59e0b", fontSize: 11,
+                          background: "transparent", border: `1px solid ${oaiApiKey ? "rgba(245,158,11,0.3)" : "rgba(100,100,100,0.3)"}`,
+                          color: oaiApiKey ? "#f59e0b" : "#555", fontSize: 11,
+                          opacity: oaiApiKey ? 1 : 0.5, cursor: oaiApiKey ? "pointer" : "default",
                           display: "flex", alignItems: "center", justifyContent: "center",
                         }}>訳</button>
                       )}
@@ -2638,9 +2657,15 @@ export default function EarFlow() {
             <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
               {savedSession.queue.length}件のキュー
               {(() => {
-                const totalChars = savedSession.queue.reduce((sum, item) => sum + (item.charCount || 0), 0);
-                const est = formatEstimatedTime(totalChars, rate);
-                return est ? <span style={{ color: "#50dcb4" }}> · {est}</span> : null;
+                const totalMin = savedSession.queue.reduce((sum, item) => {
+                  const base = CHARS_PER_MIN[item.lang] || CHARS_PER_MIN.ja;
+                  return sum + (item.charCount || 0) / (base * rate);
+                }, 0);
+                const rounded = Math.round(totalMin);
+                if (rounded < 1) return <span style={{ color: "#50dcb4" }}> · 1分未満</span>;
+                if (rounded < 60) return <span style={{ color: "#50dcb4" }}> · 約{rounded}分</span>;
+                const h = Math.floor(rounded / 60); const m = rounded % 60;
+                return <span style={{ color: "#50dcb4" }}> · 約{h}時間{m > 0 ? `${m}分` : ""}</span>;
               })()}
               {savedSession.activeIdx >= 0 && savedSession.queue[savedSession.activeIdx] && (
                 <> · 「{savedSession.queue[savedSession.activeIdx].title.slice(0, 25)}」
@@ -2713,7 +2738,7 @@ export default function EarFlow() {
           <div style={{ maxWidth: 620, margin: "0 auto" }}>
             {/* Progress */}
             <div style={{ height: 3, background: "#1a1a26", borderRadius: 2, marginBottom: 8, overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${progress}%`, background: "linear-gradient(90deg, #50dcb4, #7ec8e8)", borderRadius: 2, transition: "width 0.5s" }} />
+              <div style={{ height: "100%", width: `${progress}%`, background: paused ? "#555" : "linear-gradient(90deg, #50dcb4, #7ec8e8)", borderRadius: 2, transition: "width 0.5s" }} />
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2827,11 +2852,12 @@ function TextHighlight({ sentences, highlightIdx }) {
 }
 
 /* --- Estimated Reading Time --- */
-const BASE_CHARS_PER_MIN = 370; // Japanese TTS ~370 chars/min at 1.0x
+const CHARS_PER_MIN = { ja: 370, zh: 300, ko: 320, en: 200 };
 
-function formatEstimatedTime(charCount, rate) {
+function formatEstimatedTime(charCount, rate, lang) {
   if (!charCount || charCount <= 0) return null;
-  const totalMin = Math.round(charCount / (BASE_CHARS_PER_MIN * rate));
+  const base = CHARS_PER_MIN[lang] || CHARS_PER_MIN.ja;
+  const totalMin = Math.round(charCount / (base * rate));
   if (totalMin < 1) return "1分未満";
   if (totalMin < 60) return `約${totalMin}分`;
   const h = Math.floor(totalMin / 60);
