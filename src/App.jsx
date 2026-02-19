@@ -58,14 +58,20 @@ function cleanTextForTTS(text) {
 }
 
 // Fetch with automatic retry (exponential backoff) and per-request timeout
-async function fetchWithRetry(url, options, retries = 2, timeoutMs = 20000) {
+// NOTE: timer is NOT cleared after headers arrive — the AbortController signal
+// also protects against slow body streaming (e.g., .blob() or .body.getReader()).
+async function fetchWithRetry(url, options, retries = 1, timeoutMs = 18000) {
   for (let i = 0; i <= retries; i++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, { ...options, signal: controller.signal });
+      if (res.ok || res.status === 400) {
+        // Don't clearTimeout here — signal protects body reads too.
+        // Timer fires as no-op after response is fully consumed.
+        return res;
+      }
       clearTimeout(timer);
-      if (res.ok || res.status === 400) return res; // 400 = bad input, don't retry
       if (i < retries) { await new Promise(r => setTimeout(r, 800 * (i + 1))); continue; }
       return res;
     } catch (err) {
@@ -1090,8 +1096,12 @@ export default function EarFlow() {
               if (sb.updating)
                 await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
               if (ms.readyState === "open") ms.endOfStream();
-            } catch {
+            } catch (streamErr) {
               try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
+              if (streamErr?.name === "AbortError") {
+                flash("⚠ 音声ストリーミングタイムアウト。再試行してください");
+                setSpeaking(false);
+              }
             }
             resolve();
           });
