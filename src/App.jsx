@@ -1597,7 +1597,9 @@ export default function EarFlow() {
 
   const addTextInput = () => {
     if (!inputText.trim()) return;
-    addItem(inputText.trim(), inputText.trim().slice(0, 35), "text", 0);
+    const textLang = detectLanguage(inputText.trim());
+    addItem(inputText.trim(), inputText.trim().slice(0, 35), "text", 0, textLang);
+    if (textLang !== "ja") flash(`✓ 追加しました — 「訳」ボタンで日本語に翻訳できます`);
     setInputText("");
   };
 
@@ -1618,8 +1620,10 @@ export default function EarFlow() {
         setUrlLoading(false);
         return;
       }
-      addItem(data.text, data.title || data.source, "url", 0);
-      flash(`✓ ${data.source} から ${data.charCount.toLocaleString()}字を取得`);
+      const urlLang = detectLanguage(data.text);
+      addItem(data.text, data.title || data.source, "url", 0, urlLang);
+      const langHint = urlLang !== "ja" ? " — 「訳」ボタンで日本語に翻訳できます" : "";
+      flash(`✓ ${data.source} から ${data.charCount.toLocaleString()}字を取得${langHint}`);
       setInputUrl("");
     } catch (e) {
       flash("⚠ ネットワークエラー: " + e.message);
@@ -2159,7 +2163,7 @@ export default function EarFlow() {
               const itemLang = item.lang || "ja";
               const langColors = { en: "#f59e0b", zh: "#ef4444", ko: "#a78bfa", ja: "#60a5fa" };
               const langLabels = { en: "EN", zh: "ZH", ko: "KO", ja: "JA" };
-              const canTranslate = itemLang !== "ja" && !item._translating && oaiApiKey;
+              const canTranslate = itemLang !== "ja" && !item._translating;
 
               return (
                 <div key={item.id} style={{
