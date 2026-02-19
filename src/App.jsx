@@ -859,6 +859,7 @@ export default function EarFlow() {
 
     const myPlayId = ++playIdRef.current;
     currentRateRef.current = rateVal ?? 1.0;
+    generatedRateRef.current = 1.0; // ElevenLabs generates at 1x; speed is purely via playbackRate
 
     try {
       flash("🔊 音声生成中（" + text.length + "文字）...");
@@ -1009,6 +1010,7 @@ export default function EarFlow() {
 
     const myPlayId = ++playIdRef.current;
     currentRateRef.current = rateVal ?? 1.0;
+    generatedRateRef.current = 1.0; // OpenAI TTS generates at 1x; speed is purely via playbackRate
 
     try {
       flash("音声生成中...");
