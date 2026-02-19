@@ -1095,6 +1095,8 @@ export default function EarFlow() {
         audio.volume = 1.0;
         setupEdgeAudio(audio, msUrl, rateVal);
 
+        // Stream audio with 5s data-receive timeout → fallback to browser TTS
+        let streamFallback = false;
         await new Promise((resolve) => {
           ms.addEventListener("sourceopen", async () => {
             try {
@@ -1102,10 +1104,24 @@ export default function EarFlow() {
               const reader = fetchRes.body.getReader();
               let started = false;
 
+              // 5s timeout: if no audio data chunk arrives, cancel and fallback
+              let dataTimer = setTimeout(() => {
+                streamFallback = true;
+                reader.cancel();
+              }, 5000);
+
               while (true) {
                 const { done, value } = await reader.read();
+                clearTimeout(dataTimer);
+                if (streamFallback) break;
                 if (playIdRef.current !== myPlayId) { reader.cancel(); resolve(); return; }
                 if (done) break;
+
+                // Reset timeout for next chunk
+                dataTimer = setTimeout(() => {
+                  streamFallback = true;
+                  reader.cancel();
+                }, 5000);
 
                 if (sb.updating)
                   await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
@@ -1119,19 +1135,25 @@ export default function EarFlow() {
                 }
               }
 
-              if (sb.updating)
-                await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
-              if (ms.readyState === "open") ms.endOfStream();
-            } catch (streamErr) {
-              try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
-              if (streamErr?.name === "AbortError") {
-                flash("⚠ 音声ストリーミングタイムアウト。再試行してください");
-                setSpeaking(false);
+              clearTimeout(dataTimer);
+              if (!streamFallback) {
+                if (sb.updating)
+                  await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
+                if (ms.readyState === "open") ms.endOfStream();
               }
+            } catch {
+              try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
             }
             resolve();
           });
         });
+        if (streamFallback) {
+          // Clean up failed audio element
+          audio.pause(); audio.src = ""; URL.revokeObjectURL(msUrl);
+          if (playIdRef.current !== myPlayId) return;
+          const totalWait = Math.round(performance.now() - _t0);
+          fallbackToBrowser(`ストリーム遅延 (${totalWait}ms)`);
+        }
         return;
       }
 
