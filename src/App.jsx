@@ -8,76 +8,6 @@ import { useState, useRef, useEffect } from "react";
 
 
 
-// --- Browser-direct Edge TTS (WebSocket to Bing, no server proxy) ---
-const EDGE_TTS_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-function escapeSSML(t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
-
-function edgeTTSBrowser(text, voiceName, rateVal) {
-  return new Promise((resolve, reject) => {
-    const id = crypto.randomUUID().replaceAll("-", "");
-    let ws;
-    try {
-      ws = new WebSocket(
-        `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${EDGE_TTS_TOKEN}&ConnectionId=${id}`
-      );
-    } catch { return reject(new Error("ws_create")); }
-    ws.binaryType = "arraybuffer";
-
-    const parts = [];
-    let done = false;
-    const timer = setTimeout(() => { if (!done) { done = true; try { ws.close(); } catch {} reject(new Error("timeout")); } }, 15000);
-
-    const finish = (err) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      try { ws.close(); } catch {}
-      if (err) reject(err);
-      else if (parts.length === 0) reject(new Error("no_audio"));
-      else resolve(new Blob(parts, { type: "audio/mpeg" }));
-    };
-
-    const rp = Math.round(((rateVal || 1) - 1) * 100);
-    const rateStr = rp >= 0 ? `+${rp}%` : `${rp}%`;
-    const lm = voiceName.match(/^([a-z]{2}-[A-Z]{2})/);
-    const lang = lm ? lm[1] : "ja-JP";
-
-    ws.onopen = () => {
-      ws.send(
-        `X-Timestamp:${Date()}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n` +
-        JSON.stringify({ context: { synthesis: { audio: {
-          metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false },
-          outputFormat: "audio-24khz-48kbitrate-mono-mp3",
-        }}}})
-      );
-      ws.send(
-        `X-RequestId:${id}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${Date()}Z\r\nPath:ssml\r\n\r\n` +
-        `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${lang}'>` +
-        `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rateStr}' volume='+0%'>` +
-        `${escapeSSML(text)}</prosody></voice></speak>`
-      );
-    };
-
-    const SEP = new TextEncoder().encode("Path:audio\r\n");
-    ws.onmessage = (e) => {
-      if (done) return;
-      if (typeof e.data === "string") {
-        if (e.data.includes("turn.end")) finish(null);
-        return;
-      }
-      const d = new Uint8Array(e.data);
-      for (let i = 0; i <= d.length - SEP.length; i++) {
-        let ok = true;
-        for (let j = 0; j < SEP.length; j++) { if (d[i + j] !== SEP[j]) { ok = false; break; } }
-        if (ok) { parts.push(d.slice(i + SEP.length)); return; }
-      }
-    };
-
-    ws.onerror = () => finish(new Error("ws_error"));
-    ws.onclose = () => { if (!done) finish(new Error("ws_closed")); };
-  });
-}
-
 // --- File readers ---
 const readBuf = (f) => new Promise((r, j) => { const x = new FileReader(); x.onload = () => r(x.result); x.onerror = j; x.readAsArrayBuffer(f); });
 const readTxt = (f) => new Promise((r, j) => { const x = new FileReader(); x.onload = () => r(x.result); x.onerror = j; x.readAsText(f); });
@@ -127,27 +57,17 @@ function cleanTextForTTS(text) {
   return t.trim();
 }
 
-// Fetch with automatic retry (exponential backoff) and per-request timeout
-// NOTE: timer is NOT cleared after headers arrive — the AbortController signal
-// also protects against slow body streaming (e.g., .blob() or .body.getReader()).
-async function fetchWithRetry(url, options, retries = 1, timeoutMs = 18000) {
+// Fetch with automatic retry (exponential backoff)
+async function fetchWithRetry(url, options, retries = 2) {
   for (let i = 0; i <= retries; i++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { ...options, signal: controller.signal });
-      if (res.ok || res.status === 400) {
-        // Don't clearTimeout here — signal protects body reads too.
-        // Timer fires as no-op after response is fully consumed.
-        return res;
-      }
-      clearTimeout(timer);
-      if (i < retries) { await new Promise(r => setTimeout(r, 800 * (i + 1))); continue; }
+      const res = await fetch(url, options);
+      if (res.ok || res.status === 400) return res; // 400 = bad input, don't retry
+      if (i < retries) { await new Promise(r => setTimeout(r, 1000 * (i + 1))); continue; }
       return res;
     } catch (err) {
-      clearTimeout(timer);
       if (i >= retries) throw err;
-      await new Promise(r => setTimeout(r, 800 * (i + 1)));
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
 }
@@ -385,8 +305,6 @@ export default function EarFlow() {
 
   const audioRef = useRef(null); // HTML Audio element
   const playIdRef = useRef(0); // Guard against race conditions in async TTS
-  const edgeDirectRef = useRef(null); // null=untested, true=browser WS works, false=use server proxy
-
   // Refs to avoid stale closures in callbacks
   const queueRef = useRef([]);
   const activeIdxRef = useRef(-1);
@@ -1027,26 +945,19 @@ export default function EarFlow() {
     const key = `${itemId}_${v}_${r}`;
     if (audioCacheRef.current.has(key)) return;
     const chunks = splitTextSmart(text, 5000);
-
-    // Use browser-direct if available, else server proxy
-    if (edgeDirectRef.current !== false) {
-      Promise.all(chunks.map(c => edgeTTSBrowser(c, v, r).catch(() => null)))
-        .then(blobs => {
-          const valid = blobs.filter(b => b && b.size >= 100);
-          if (valid.length > 0) cacheSet(key, new Blob(valid, { type: "audio/mpeg" }));
-        }).catch(() => {});
-    } else {
-      Promise.all(chunks.map(chunk =>
-        fetchWithRetry("/api/edge-tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: chunk, voice: v, rate: r }),
-        }).then(r => r.ok ? r.blob() : null).catch(() => null)
-      )).then(blobs => {
-        const valid = blobs.filter(b => b && b.size >= 100);
-        if (valid.length > 0) cacheSet(key, new Blob(valid, { type: "audio/mpeg" }));
-      }).catch(() => {});
-    }
+    Promise.all(chunks.map(chunk =>
+      fetchWithRetry("/api/edge-tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: chunk, voice: v, rate: r }),
+      }).then(r => r.ok ? r.blob() : null).catch(() => null)
+    )).then(blobs => {
+      const valid = blobs.filter(b => b);
+      if (valid.length > 0) {
+        const combined = new Blob(valid, { type: "audio/mpeg" });
+        if (combined.size >= 100) cacheSet(key, combined);
+      }
+    }).catch(() => {});
   };
 
   // --- Edge TTS (free, no API key) ---
@@ -1114,40 +1025,12 @@ export default function EarFlow() {
         return;
       }
 
-      // 2. No cache — try browser-direct WebSocket first (fastest: no server proxy)
+      // 2. No cache — fetch with streaming playback via MediaSource
       flash("音声生成中...");
 
       const chunks = splitTextSmart(text, 5000);
 
-      if (edgeDirectRef.current !== false) {
-        try {
-          const directBlobs = await Promise.all(
-            chunks.map(c => edgeTTSBrowser(c, voice, rateVal ?? 1.0))
-          );
-          const blob = new Blob(directBlobs, { type: "audio/mpeg" });
-          if (blob.size >= 100 && playIdRef.current === myPlayId) {
-            edgeDirectRef.current = true;
-            if (cacheKey) cacheSet(cacheKey, blob);
-            const url = URL.createObjectURL(blob);
-            if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
-            const audio = new Audio(url);
-            audioRef.current = audio;
-            audio.playbackRate = 1.0;
-            audio.volume = 1.0;
-            setupEdgeAudio(audio, url, rateVal);
-            audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
-            return;
-          }
-        } catch {
-          edgeDirectRef.current = false;
-          // Fall through to server proxy
-        }
-      }
-
-      // Bail out if playback was cancelled during browser-direct attempt
-      if (playIdRef.current !== myPlayId) return;
-
-      // 3. Server proxy fallback — MediaSource streaming
+      // For single chunk + MediaSource support: stream and play immediately
       if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
         let fetchRes;
         try {
