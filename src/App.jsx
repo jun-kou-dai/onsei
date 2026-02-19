@@ -657,6 +657,7 @@ export default function EarFlow() {
     if (!elApiKey) { flash("⚠ ElevenLabs APIキーが設定されていません。⚙設定から入力してください"); setSpeaking(false); return; }
 
     const myPlayId = ++playIdRef.current;
+    currentRateRef.current = rateVal ?? 1.0;
 
     try {
       flash("🔊 音声生成中（" + text.length + "文字）...");
@@ -735,6 +736,7 @@ export default function EarFlow() {
 
       // Stop previous audio if any
       if (audioRef.current) {
+        audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null;
         audioRef.current.pause();
         audioRef.current.src = "";
       }
@@ -770,7 +772,7 @@ export default function EarFlow() {
           activeIdxRef.current = nextIdx;
           setupSentences(q[nextIdx].text);
           const nextText = q[nextIdx].text;
-          if (nextText) elSpeak(nextText, rateVal);
+          if (nextText) elSpeak(nextText, currentRateRef.current);
         } else {
           setActiveIdx(-1); activeIdxRef.current = -1;
           resetHighlight();
@@ -801,6 +803,7 @@ export default function EarFlow() {
     if (!oaiApiKey) { flash("⚠ OpenAI APIキーが設定されていません。設定から入力してください"); setSpeaking(false); return; }
 
     const myPlayId = ++playIdRef.current;
+    currentRateRef.current = rateVal ?? 1.0;
 
     try {
       flash("音声生成中...");
@@ -868,6 +871,7 @@ export default function EarFlow() {
       const url = URL.createObjectURL(combined);
 
       if (audioRef.current) {
+        audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null;
         audioRef.current.pause();
         audioRef.current.src = "";
       }
@@ -901,7 +905,7 @@ export default function EarFlow() {
           activeIdxRef.current = nextIdx;
           setupSentences(q[nextIdx].text);
           const nextText = q[nextIdx].text;
-          if (nextText) openaiSpeak(nextText, rateVal);
+          if (nextText) openaiSpeak(nextText, currentRateRef.current);
         } else {
           setActiveIdx(-1); activeIdxRef.current = -1;
           resetHighlight();
@@ -971,7 +975,7 @@ export default function EarFlow() {
         setupSentences(q[nextIdx].text);
         if (nextIdx + 1 < q.length && q[nextIdx + 1]?.status === "ready")
           preloadEdgeAudio(q[nextIdx + 1].id, q[nextIdx + 1].text);
-        if (q[nextIdx].text) edgeSpeak(q[nextIdx].text, rateVal);
+        if (q[nextIdx].text) edgeSpeak(q[nextIdx].text, currentRateRef.current);
       } else {
         setActiveIdx(-1); activeIdxRef.current = -1;
         resetHighlight();
@@ -988,6 +992,7 @@ export default function EarFlow() {
 
   const edgeSpeak = async (text, rateVal) => {
     const myPlayId = ++playIdRef.current;
+    currentRateRef.current = rateVal ?? 1.0;
 
     try {
       setSpeaking(true);
@@ -1002,7 +1007,7 @@ export default function EarFlow() {
       if (cached) {
         audioCacheRef.current.delete(cacheKey);
         const url = URL.createObjectURL(cached);
-        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
         const audio = new Audio(url);
         audioRef.current = audio;
         audio.playbackRate = 1.0; // Edge TTS handles rate via SSML
@@ -1037,7 +1042,7 @@ export default function EarFlow() {
 
         const ms = new MediaSource();
         const msUrl = URL.createObjectURL(ms);
-        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
         const audio = new Audio();
         audioRef.current = audio;
         audio.src = msUrl;
@@ -1545,7 +1550,7 @@ export default function EarFlow() {
         result.splice(itemIndex + 1, 0, newItem);
         return result;
       });
-      flash(`✓ 翻訳完了（${data.charCount.toLocaleString()}字）`);
+      flash(`✓ 翻訳完了（${(data.charCount || data.text?.length || 0).toLocaleString()}字）`);
     } catch (e) {
       flash("⚠ ネットワークエラー: " + e.message);
       setQueue(q => q.map(it => it.id === itemId ? { ...it, _translating: false } : it));

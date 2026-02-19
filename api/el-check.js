@@ -35,7 +35,7 @@ export default async function handler(req, res) {
       out.rawBody = rawBody;
     }
 
-    out.ok = true;
+    out.ok = out.key_ok;
     return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ error: e.message });
