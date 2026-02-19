@@ -957,13 +957,16 @@ export default function EarFlow() {
     const key = `${itemId}_${v}_${r}`;
     if (audioCacheRef.current.has(key)) return;
     const chunks = splitTextSmart(text, 5000);
-    Promise.all(chunks.map(chunk =>
-      fetchWithRetry("/api/edge-tts", {
+    Promise.all(chunks.map(chunk => {
+      const c = new AbortController();
+      const t = setTimeout(() => c.abort(), 8000);
+      return fetch("/api/edge-tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: chunk, voice: v, rate: r }),
-      }, 0).then(r => r.ok ? r.blob() : null).catch(() => null)
-    )).then(blobs => {
+        signal: c.signal,
+      }).then(r => { clearTimeout(t); return r.ok ? r.blob() : null; }).catch(() => { clearTimeout(t); return null; });
+    })).then(blobs => {
       const valid = blobs.filter(b => b);
       if (valid.length > 0) {
         const combined = new Blob(valid, { type: "audio/mpeg" });
@@ -1042,29 +1045,43 @@ export default function EarFlow() {
 
       const chunks = splitTextSmart(text, 5000);
 
+      // Helper: fallback to browser TTS
+      const fallbackToBrowser = (reason) => {
+        flash(`⚠ Edge TTS ${reason} → ブラウザ音声に切替`);
+        stoppedRef.current = false;
+        chunksRef.current = splitText(text);
+        totalCharsRef.current = text.length;
+        spokenCharsRef.current = 0;
+        speakChunk(0, rateVal);
+      };
+
       // For single chunk + MediaSource support: stream and play immediately
       if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
         let fetchRes;
         const _t0 = performance.now();
         try {
-          fetchRes = await fetchWithRetry("/api/edge-tts", {
+          const controller = new AbortController();
+          const raceTimer = setTimeout(() => controller.abort(), 8000);
+          fetchRes = await fetch("/api/edge-tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: chunks[0], voice: voice, rate: rateVal ?? 1.0 }),
-          }, 0);
+            signal: controller.signal,
+          });
+          clearTimeout(raceTimer);
         } catch {
-          console.warn(`[TTS] fetch failed after ${Math.round(performance.now()-_t0)}ms`);
-          flash("⚠ ネットワークエラー"); setSpeaking(false); return;
+          if (playIdRef.current !== myPlayId) return;
+          fallbackToBrowser(`応答なし (${Math.round(performance.now()-_t0)}ms)`);
+          return;
         }
         const _elapsed = Math.round(performance.now()-_t0);
         const _wsMs = fetchRes.headers.get("X-Timing-WsConnect");
         const _audioMs = fetchRes.headers.get("X-Timing-FirstAudio");
         console.log(`[TTS] fetch=${_elapsed}ms | server: ws=${_wsMs} firstAudio=${_audioMs}`);
         if (!fetchRes.ok) {
-          const errBody = await fetchRes.text().catch(() => "");
-          console.warn(`[TTS] error response:`, errBody);
-          flash("⚠ 音声生成エラー: " + errBody.slice(0, 100));
-          setSpeaking(false); return;
+          if (playIdRef.current !== myPlayId) return;
+          fallbackToBrowser(`エラー (${_elapsed}ms)`);
+          return;
         }
         if (playIdRef.current !== myPlayId) return;
 
@@ -1118,18 +1135,22 @@ export default function EarFlow() {
         return;
       }
 
-      // 3. Multi-chunk or no MediaSource — parallel fetch with retry, skip failed chunks
-      const blobResults = await Promise.all(chunks.map(chunk =>
-        fetchWithRetry("/api/edge-tts", {
+      // 3. Multi-chunk or no MediaSource — parallel fetch, 8s timeout per chunk
+      const blobResults = await Promise.all(chunks.map(chunk => {
+        const c = new AbortController();
+        const t = setTimeout(() => c.abort(), 8000);
+        return fetch("/api/edge-tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: chunk, voice: voice, rate: rateVal ?? 1.0 }),
-        }, 0).then(async r => r.ok ? r.blob() : null).catch(() => null)
-      ));
+          signal: c.signal,
+        }).then(async r => { clearTimeout(t); return r.ok ? r.blob() : null; }).catch(() => { clearTimeout(t); return null; });
+      }));
       const blobs = blobResults.filter(b => b && b.size >= 100);
       if (blobs.length === 0) {
-        flash("⚠ 音声生成に失敗しました");
-        setSpeaking(false); return;
+        if (playIdRef.current !== myPlayId) return;
+        fallbackToBrowser("全チャンク失敗");
+        return;
       }
       if (blobs.length < chunks.length) {
         flash(`⚠ ${chunks.length - blobs.length}チャンクをスキップ`);
