@@ -1144,6 +1144,9 @@ export default function EarFlow() {
         }
       }
 
+      // Bail out if playback was cancelled during browser-direct attempt
+      if (playIdRef.current !== myPlayId) return;
+
       // 3. Server proxy fallback — MediaSource streaming
       if (chunks.length === 1 && window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
         let fetchRes;
@@ -1380,8 +1383,17 @@ export default function EarFlow() {
       setProgress(100);
       stopKeepAlive();
       stopProgress();
-      setActiveIdx(-1); activeIdxRef.current = -1;
-      resetHighlight();
+      // Auto-play next queue item (match behavior of Edge/OpenAI/ElevenLabs)
+      const nextIdx = activeIdxRef.current + 1;
+      const q = queueRef.current;
+      if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
+        setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
+        setupSentences(q[nextIdx].text);
+        handlePlay(nextIdx);
+      } else {
+        setActiveIdx(-1); activeIdxRef.current = -1;
+        resetHighlight();
+      }
       return;
     }
 
