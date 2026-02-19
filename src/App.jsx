@@ -2279,6 +2279,7 @@ function SpeedChips({ rate, onChange, compact }) {
             borderRadius: 6, padding: compact ? "3px 5px" : "5px 8px",
             fontSize: compact ? 10 : 12, fontWeight: on ? 700 : 400,
             minWidth: compact ? 28 : 36, fontFamily: "monospace",
+            outline: "none", cursor: "pointer",
           }}>{r}x</button>
         );
       })}
