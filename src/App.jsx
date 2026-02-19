@@ -1003,7 +1003,7 @@ export default function EarFlow() {
     }
   };
 
-  // --- OpenAI TTS ---
+  // --- OpenAI TTS (streaming via MediaSource for instant playback) ---
   const openaiSpeak = async (text, rateVal) => {
     if (!oaiApiKey) { flash("⚠ OpenAI APIキーが設定されていません。設定から入力してください"); setSpeaking(false); return; }
 
@@ -1017,6 +1017,163 @@ export default function EarFlow() {
       // OpenAI TTS has 4096 char limit — chunk at sentence boundaries
       const chunks = splitTextSmart(text, 4096);
 
+      // Helper: set up audio event handlers for OpenAI TTS
+      const setupOaiAudio = (audio, urlToRevoke) => {
+        audio.onplay = () => {
+          setSpeaking(true); setPaused(false);
+          flash("");
+          if (seekAfterLoadRef.current > 0) {
+            const target = seekAfterLoadRef.current;
+            seekAfterLoadRef.current = 0;
+            const doSeek = () => { if (audio.duration > 0 && isFinite(audio.duration)) audio.currentTime = (target / 100) * audio.duration; };
+            if (audio.duration > 0 && isFinite(audio.duration)) doSeek();
+            else audio.addEventListener("durationchange", doSeek, { once: true });
+          }
+        };
+        audio.onended = () => {
+          setSpeaking(false); setPaused(false); setProgress(100);
+          stopProgress();
+          URL.revokeObjectURL(urlToRevoke);
+          const nextIdx = activeIdxRef.current + 1;
+          const q = queueRef.current;
+          if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
+            setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
+            setupSentences(q[nextIdx].text);
+            const nextText = q[nextIdx].text;
+            if (nextText) openaiSpeak(nextText, currentRateRef.current);
+          } else {
+            setActiveIdx(-1); activeIdxRef.current = -1;
+            resetHighlight();
+          }
+        };
+        audio.onerror = () => {
+          setSpeaking(false); flash("⚠ 音声再生エラー");
+          URL.revokeObjectURL(urlToRevoke);
+        };
+        audio.ontimeupdate = () => {
+          if (audio.duration > 0) {
+            setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+            updateHighlightFromAudio(audio.currentTime, audio.duration);
+          }
+        };
+      };
+
+      // --- Streaming playback via MediaSource (like Edge TTS) ---
+      if (window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
+        const ms = new MediaSource();
+        const msUrl = URL.createObjectURL(ms);
+        if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
+        const audio = new Audio();
+        audioRef.current = audio;
+        audio.src = msUrl;
+        audio.playbackRate = rateVal ?? 1.0;
+        audio.volume = 1.0;
+        setupOaiAudio(audio, msUrl);
+
+        let started = false;
+        let totalBytes = 0;
+
+        await new Promise((resolve, reject) => {
+          ms.addEventListener("sourceopen", async () => {
+            try {
+              const sb = ms.addSourceBuffer("audio/mpeg");
+
+              for (const chunk of chunks) {
+                if (playIdRef.current !== myPlayId) { resolve(); return; }
+
+                let res;
+                try {
+                  const oaiCtrl = new AbortController();
+                  const oaiTimer = setTimeout(() => oaiCtrl.abort(), 55000);
+                  res = await fetch("/api/openai-tts", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      apiKey: oaiApiKey,
+                      text: chunk,
+                      voice: oaiVoice,
+                      model: oaiModel,
+                    }),
+                    signal: oaiCtrl.signal,
+                  });
+                  clearTimeout(oaiTimer);
+                } catch (fetchErr) {
+                  reject(new Error("network"));
+                  return;
+                }
+
+                if (playIdRef.current !== myPlayId) { resolve(); return; }
+
+                if (!res.ok) {
+                  const errBody = await res.text().catch(() => "");
+                  let msg = "";
+                  try {
+                    const parsed = JSON.parse(errBody);
+                    msg = parsed?.detail?.error?.message || parsed?.error || errBody.slice(0, 150);
+                  } catch { msg = errBody.slice(0, 150); }
+
+                  if (res.status === 401) {
+                    reject(new Error("auth"));
+                  } else if (res.status === 429) {
+                    reject(new Error("ratelimit"));
+                  } else {
+                    reject(new Error(msg));
+                  }
+                  return;
+                }
+
+                // Stream the response body into the SourceBuffer
+                const reader = res.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  if (playIdRef.current !== myPlayId) { resolve(); return; }
+
+                  totalBytes += value.byteLength;
+
+                  // Append chunk to SourceBuffer
+                  await new Promise((appendResolve) => {
+                    const doAppend = () => {
+                      if (sb.updating) {
+                        sb.addEventListener("updateend", doAppend, { once: true });
+                        return;
+                      }
+                      sb.appendBuffer(value);
+                      sb.addEventListener("updateend", appendResolve, { once: true });
+                    };
+                    doAppend();
+                  });
+
+                  // Start playback as soon as first data arrives
+                  if (!started) {
+                    started = true;
+                    audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+                  }
+                }
+              }
+
+              // All chunks done — finalize
+              if (sb.updating)
+                await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
+              if (ms.readyState === "open") ms.endOfStream();
+            } catch (err) {
+              try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
+              reject(err);
+              return;
+            }
+            resolve();
+          });
+        });
+
+        if (totalBytes < 100 && !started) {
+          flash("⚠ 音声データが空です");
+          setSpeaking(false);
+          URL.revokeObjectURL(msUrl);
+        }
+        return;
+      }
+
+      // --- Fallback: no MediaSource support — collect all blobs then play ---
       const blobs = [];
       for (const chunk of chunks) {
         if (playIdRef.current !== myPlayId) return;
@@ -1069,7 +1226,6 @@ export default function EarFlow() {
 
       if (playIdRef.current !== myPlayId) return;
 
-      // Combine blobs if multiple chunks
       const combined = new Blob(blobs, { type: "audio/mpeg" });
       if (combined.size < 100) {
         flash("⚠ 音声データが空です");
@@ -1078,64 +1234,23 @@ export default function EarFlow() {
       }
 
       const url = URL.createObjectURL(combined);
-
-      if (audioRef.current) {
-        audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null;
-        audioRef.current.pause();
-        audioRef.current.src = "";
-      }
-
+      if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
       const audio = new Audio(url);
       audioRef.current = audio;
       audio.playbackRate = rateVal ?? 1.0;
       audio.volume = 1.0;
-
-      audio.onplay = () => {
-        setSpeaking(true); setPaused(false);
-        flash("");
-        if (seekAfterLoadRef.current > 0) {
-          const target = seekAfterLoadRef.current;
-          seekAfterLoadRef.current = 0;
-          const doSeek = () => { if (audio.duration > 0 && isFinite(audio.duration)) audio.currentTime = (target / 100) * audio.duration; };
-          if (audio.duration > 0 && isFinite(audio.duration)) doSeek();
-          else audio.addEventListener("durationchange", doSeek, { once: true });
-        }
-      };
-
-      audio.onended = () => {
-        setSpeaking(false); setPaused(false); setProgress(100);
-        stopProgress();
-        URL.revokeObjectURL(url);
-        // Auto-play next
-        const nextIdx = activeIdxRef.current + 1;
-        const q = queueRef.current;
-        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
-          setActiveIdx(nextIdx);
-          activeIdxRef.current = nextIdx;
-          setupSentences(q[nextIdx].text);
-          const nextText = q[nextIdx].text;
-          if (nextText) openaiSpeak(nextText, currentRateRef.current);
-        } else {
-          setActiveIdx(-1); activeIdxRef.current = -1;
-          resetHighlight();
-        }
-      };
-
-      audio.onerror = () => {
-        setSpeaking(false); flash("⚠ 音声再生エラー");
-        URL.revokeObjectURL(url);
-      };
-
-      audio.ontimeupdate = () => {
-        if (audio.duration > 0) {
-          setProgress(Math.round((audio.currentTime / audio.duration) * 100));
-          updateHighlightFromAudio(audio.currentTime, audio.duration);
-        }
-      };
-
+      setupOaiAudio(audio, url);
       audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
     } catch (e) {
-      flash("⚠ " + e.message);
+      if (e.message === "network") {
+        flash("⚠ ネットワークエラー: サーバーに接続できません");
+      } else if (e.message === "auth") {
+        flash("⚠ OpenAI APIキーが無効です。キーを確認してください");
+      } else if (e.message === "ratelimit") {
+        flash("⚠ レート制限。少し待ってから再試行してください");
+      } else {
+        flash("⚠ " + e.message);
+      }
       setSpeaking(false);
     }
   };
