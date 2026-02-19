@@ -1013,11 +1013,7 @@ export default function EarFlow() {
     generatedRateRef.current = 1.0; // OpenAI TTS generates at 1x; speed is purely via playbackRate
 
     try {
-      flash("音声生成中...");
       setSpeaking(true);
-
-      // OpenAI TTS has 4096 char limit — chunk at sentence boundaries
-      const chunks = splitTextSmart(text, 4096);
 
       // Helper: set up audio event handlers for OpenAI TTS
       const setupOaiAudio = (audio, urlToRevoke) => {
@@ -1041,6 +1037,9 @@ export default function EarFlow() {
           if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
             setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
             setupSentences(q[nextIdx].text);
+            // Preload the one after next
+            if (nextIdx + 1 < q.length && q[nextIdx + 1]?.status === "ready")
+              preloadOpenaiAudio(q[nextIdx + 1].id, q[nextIdx + 1].text);
             const nextText = q[nextIdx].text;
             if (nextText) openaiSpeak(nextText, currentRateRef.current);
           } else {
@@ -1060,7 +1059,30 @@ export default function EarFlow() {
         };
       };
 
-      // --- Streaming playback via MediaSource (like Edge TTS) ---
+      // 1. Check preload cache — instant playback
+      const activeItem = queueRef.current[activeIdxRef.current];
+      const cacheKey = activeItem ? `oai_${activeItem.id}_${oaiVoice}_${oaiModel}` : null;
+      const cached = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
+
+      if (cached) {
+        audioCacheRef.current.delete(cacheKey);
+        const url = URL.createObjectURL(cached);
+        if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.playbackRate = rateVal ?? 1.0;
+        audio.volume = 1.0;
+        setupOaiAudio(audio, url);
+        audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+        return;
+      }
+
+      flash("音声生成中...");
+
+      // OpenAI TTS has 4096 char limit — chunk at sentence boundaries
+      const chunks = splitTextSmart(text, 4096);
+
+      // 2. Streaming playback via MediaSource (like Edge TTS) ---
       if (window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
         const ms = new MediaSource();
         const msUrl = URL.createObjectURL(ms);
@@ -1266,6 +1288,34 @@ export default function EarFlow() {
     edgeTTSClient(text, v, r).then(blob => {
       if (blob && blob.size >= 100) cacheSet(key, blob);
     }).catch(() => {});
+  };
+
+  // --- OpenAI TTS audio preloader (background fetch) ---
+  const preloadOpenaiAudio = (itemId, text) => {
+    if (!oaiApiKey) return;
+    const key = `oai_${itemId}_${oaiVoice}_${oaiModel}`;
+    if (audioCacheRef.current.has(key)) return;
+    const chunks = splitTextSmart(text, 4096);
+    (async () => {
+      try {
+        const blobs = [];
+        for (const chunk of chunks) {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 55000);
+          const res = await fetch("/api/openai-tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apiKey: oaiApiKey, text: chunk, voice: oaiVoice, model: oaiModel }),
+            signal: ctrl.signal,
+          });
+          clearTimeout(timer);
+          if (!res.ok) return;
+          blobs.push(await res.blob());
+        }
+        const combined = new Blob(blobs, { type: "audio/mpeg" });
+        if (combined.size >= 100) cacheSet(key, combined);
+      } catch {}
+    })();
   };
 
   // --- Edge TTS (free, no API key) ---
@@ -1672,6 +1722,11 @@ export default function EarFlow() {
         }
         edgeSpeak(fullText, rate);
       } else if (ttsEngine === "openai") {
+        // Preload next item while current plays
+        const nextIdx = index + 1;
+        const q = queueRef.current;
+        if (nextIdx < q.length && q[nextIdx]?.status === "ready")
+          preloadOpenaiAudio(q[nextIdx].id, q[nextIdx].text);
         openaiSpeak(fullText, rate);
       } else if (ttsEngine === "elevenlabs") {
         elSpeak(fullText, rate);
@@ -1795,6 +1850,7 @@ export default function EarFlow() {
       }));
       setQueue(q => [...q, ...items]);
       if (ttsEngine === "edge" && items[0]) preloadEdgeAudio(items[0].id, items[0].text);
+      else if (ttsEngine === "openai" && items[0]) preloadOpenaiAudio(items[0].id, items[0].text);
       flash(`✓ ${text.length.toLocaleString()}字 → ${sections.length}パートに分割`);
       return;
     }
@@ -1807,6 +1863,7 @@ export default function EarFlow() {
       charCount: text.length, pageCount: pageCount || 0, lang: detectedLang,
     }]);
     if (ttsEngine === "edge") preloadEdgeAudio(id, text);
+    else if (ttsEngine === "openai") preloadOpenaiAudio(id, text);
   };
 
 
