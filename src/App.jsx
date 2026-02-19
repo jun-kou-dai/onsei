@@ -168,6 +168,66 @@ async function pdfToText(buf) {
   return { text: out.trim(), pages: pdf.numPages };
 }
 
+// --- Multi-language Edge TTS voice definitions ---
+const EDGE_VOICE_GROUPS = [
+  {
+    lang: "ja", label: "日本語", voices: [
+      { id: "ja-JP-NanamiNeural", name: "Nanami（女性）" },
+      { id: "ja-JP-KeitaNeural", name: "Keita（男性）" },
+    ],
+  },
+  {
+    lang: "en", label: "English", voices: [
+      { id: "en-US-JennyNeural", name: "Jenny（女性・US）" },
+      { id: "en-US-GuyNeural", name: "Guy（男性・US）" },
+      { id: "en-GB-SoniaNeural", name: "Sonia（女性・UK）" },
+    ],
+  },
+  {
+    lang: "zh", label: "中文", voices: [
+      { id: "zh-CN-XiaoxiaoNeural", name: "Xiaoxiao（女性）" },
+      { id: "zh-CN-YunxiNeural", name: "Yunxi（男性）" },
+    ],
+  },
+  {
+    lang: "ko", label: "한국어", voices: [
+      { id: "ko-KR-SunHiNeural", name: "SunHi（女性）" },
+      { id: "ko-KR-InJoonNeural", name: "InJoon（男性）" },
+    ],
+  },
+];
+const ALL_EDGE_VOICE_IDS = EDGE_VOICE_GROUPS.flatMap(g => g.voices.map(v => v.id));
+
+// Simple language detection based on character analysis
+function detectLanguage(text) {
+  const sample = text.slice(0, 2000);
+  let ja = 0, zh = 0, ko = 0, en = 0, total = 0;
+  for (const ch of sample) {
+    const code = ch.codePointAt(0);
+    if (code < 0x20) continue;
+    total++;
+    // Hiragana / Katakana → Japanese
+    if ((code >= 0x3040 && code <= 0x309F) || (code >= 0x30A0 && code <= 0x30FF)) { ja += 2; continue; }
+    // CJK Unified (shared by ja/zh, but counted separately)
+    if (code >= 0x4E00 && code <= 0x9FFF) { ja++; zh++; continue; }
+    // Hangul → Korean
+    if ((code >= 0xAC00 && code <= 0xD7AF) || (code >= 0x1100 && code <= 0x11FF)) { ko += 2; continue; }
+    // Latin letters → English
+    if ((code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A)) { en++; continue; }
+  }
+  if (total === 0) return "ja";
+  // If hiragana/katakana present → definitely Japanese (even with kanji)
+  const jaKana = [...sample].filter(ch => {
+    const c = ch.codePointAt(0);
+    return (c >= 0x3040 && c <= 0x309F) || (c >= 0x30A0 && c <= 0x30FF);
+  }).length;
+  if (jaKana > total * 0.05) return "ja";
+  if (ko > total * 0.15) return "ko";
+  if (zh > total * 0.15) return "zh";
+  if (en > total * 0.3) return "en";
+  return "ja"; // default
+}
+
 // --- localStorage helpers ---
 const lsGet = (key, fallback) => {
   try { const v = localStorage.getItem("earflow_" + key); return v !== null ? JSON.parse(v) : fallback; }
@@ -235,10 +295,9 @@ export default function EarFlow() {
   const [oaiModel, setOaiModelRaw] = useState(() => lsGet("oaiModel", "tts-1"));
 
   // --- Edge TTS state ---
-  const VALID_EDGE_VOICES = ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"];
   const [edgeVoice, setEdgeVoiceRaw] = useState(() => {
     const saved = lsGet("edgeVoice", "ja-JP-NanamiNeural");
-    return VALID_EDGE_VOICES.includes(saved) ? saved : "ja-JP-NanamiNeural";
+    return ALL_EDGE_VOICE_IDS.includes(saved) ? saved : "ja-JP-NanamiNeural";
   });
 
   const audioRef = useRef(null); // HTML Audio element
@@ -478,6 +537,7 @@ export default function EarFlow() {
         id: item.id, text: item.text, title: item.title,
         sourceType: item.sourceType, status: item.status,
         charCount: item.charCount, pageCount: item.pageCount || 0,
+        lang: item.lang || "ja",
       })),
       activeIdx: idx,
       progress: prog || 0,
@@ -1279,6 +1339,17 @@ export default function EarFlow() {
       setupSentences(fullText);
 
       if (ttsEngine === "edge") {
+        // Auto-switch voice if item language doesn't match current voice
+        const itemLang = item.lang || "ja";
+        const voiceLangPrefix = edgeVoiceRef.current.slice(0, 2); // "ja", "en", etc.
+        if (itemLang !== voiceLangPrefix) {
+          const targetGroup = EDGE_VOICE_GROUPS.find(g => g.lang === itemLang);
+          if (targetGroup && targetGroup.voices.length > 0) {
+            const autoVoice = targetGroup.voices[0].id;
+            setEdgeVoice(autoVoice);
+            flash(`🔄 音声を${targetGroup.label}に自動切替`);
+          }
+        }
         edgeSpeak(fullText, rate);
       } else if (ttsEngine === "openai") {
         openaiSpeak(fullText, rate);
@@ -1386,9 +1457,10 @@ export default function EarFlow() {
      ================================================ */
   const SPLIT_THRESHOLD = 10000; // Auto-split texts longer than this
 
-  const addItem = (rawText, title, sourceType, pageCount) => {
+  const addItem = (rawText, title, sourceType, pageCount, lang) => {
     if (!rawText || rawText.trim().length < 5) { flash("⚠ テキストが短すぎます"); return; }
     const text = cleanTextForTTS(rawText);
+    const detectedLang = lang || detectLanguage(text);
 
     // Auto-split long texts into manageable queue items
     if (text.length > SPLIT_THRESHOLD) {
@@ -1399,7 +1471,7 @@ export default function EarFlow() {
         title: `${baseTitle} (${i + 1}/${sections.length})`,
         sourceType: sourceType || "text",
         status: "ready",
-        charCount: sec.length, pageCount: 0,
+        charCount: sec.length, pageCount: 0, lang: detectedLang,
       }));
       setQueue(q => [...q, ...items]);
       if (ttsEngine === "edge" && items[0]) preloadEdgeAudio(items[0].id, items[0].text);
@@ -1412,7 +1484,7 @@ export default function EarFlow() {
       id, text, title: title || text.slice(0, 35),
       sourceType: sourceType || "text",
       status: "ready",
-      charCount: text.length, pageCount: pageCount || 0,
+      charCount: text.length, pageCount: pageCount || 0, lang: detectedLang,
     }]);
     if (ttsEngine === "edge") preloadEdgeAudio(id, text);
   };
@@ -1423,6 +1495,61 @@ export default function EarFlow() {
     setQueue(q => q.filter((_, i) => i !== index));
     if (index < activeIdx) setActiveIdx(a => a - 1);
     if (index === activeIdx) setActiveIdx(-1);
+  };
+
+  // --- TRANSLATE QUEUE ITEM ---
+  const translateItem = async (index) => {
+    const item = queueRef.current[index];
+    if (!item) return;
+    const itemId = item.id; // Track by ID, not index (index can shift during async)
+    const apiKey = oaiApiKey;
+    if (!apiKey || !apiKey.trim()) {
+      flash("⚠ 翻訳にはOpenAI APIキーが必要です。⚙設定で入力してください");
+      return;
+    }
+    const srcLang = item.lang || detectLanguage(item.text);
+    if (srcLang === "ja") {
+      flash("すでに日本語です");
+      return;
+    }
+    flash("🌐 翻訳中...");
+    setQueue(q => q.map(it => it.id === itemId ? { ...it, _translating: true } : it));
+    try {
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: apiKey.trim(), text: item.text, sourceLang: srcLang, targetLang: "ja" }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        flash("⚠ 翻訳エラー: " + (data.error || data.detail?.error?.message || "失敗"));
+        setQueue(q => q.map(it => it.id === itemId ? { ...it, _translating: false } : it));
+        return;
+      }
+      const langLabels = { en: "英語", zh: "中国語", ko: "韓国語" };
+      const newItem = {
+        id: uid(),
+        text: data.text,
+        title: `${item.title}（${langLabels[srcLang] || srcLang}→日本語）`,
+        sourceType: "translated",
+        status: "ready",
+        charCount: data.text.length,
+        pageCount: 0,
+        lang: "ja",
+      };
+      setQueue(q => {
+        const itemIndex = q.findIndex(it => it.id === itemId);
+        if (itemIndex < 0) return q; // Item was deleted during translation
+        const updated = q.map(it => it.id === itemId ? { ...it, _translating: false } : it);
+        const result = [...updated];
+        result.splice(itemIndex + 1, 0, newItem);
+        return result;
+      });
+      flash(`✓ 翻訳完了（${data.charCount.toLocaleString()}字）`);
+    } catch (e) {
+      flash("⚠ ネットワークエラー: " + e.message);
+      setQueue(q => q.map(it => it.id === itemId ? { ...it, _translating: false } : it));
+    }
   };
 
   /* ================================================
@@ -1707,23 +1834,25 @@ export default function EarFlow() {
               <div style={{ background: "rgba(0,120,212,0.05)", borderRadius: 10, padding: 12, marginBottom: 12, border: "1px solid rgba(0,120,212,0.15)" }}>
                 <div style={{ fontSize: 11, color: "#60a5fa", marginBottom: 8, fontWeight: 600 }}>Edge TTS 設定（APIキー不要）</div>
 
-                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>音声</div>
-                <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 8 }}>
-                  {[
-                    ["ja-JP-NanamiNeural", "Nanami（女性）"],
-                    ["ja-JP-KeitaNeural", "Keita（男性）"],
-                  ].map(([id, label]) => (
-                    <button key={id} onClick={() => setEdgeVoice(id)} style={{
-                      background: edgeVoice === id ? "rgba(0,120,212,0.15)" : "transparent",
-                      color: edgeVoice === id ? "#60a5fa" : "#666",
-                      border: edgeVoice === id ? "1px solid rgba(0,120,212,0.3)" : "1px solid rgba(255,255,255,0.04)",
-                      borderRadius: 6, padding: "6px 10px", fontSize: 11, textAlign: "left",
-                    }}>{label}</button>
-                  ))}
-                </div>
+                <div style={{ fontSize: 11, color: "#888", marginBottom: 6 }}>音声</div>
+                {EDGE_VOICE_GROUPS.map(group => (
+                  <div key={group.lang} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 9, color: "#555", marginBottom: 3, fontWeight: 600 }}>{group.label}</div>
+                    <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+                      {group.voices.map(v => (
+                        <button key={v.id} onClick={() => setEdgeVoice(v.id)} style={{
+                          background: edgeVoice === v.id ? "rgba(0,120,212,0.15)" : "transparent",
+                          color: edgeVoice === v.id ? "#60a5fa" : "#666",
+                          border: edgeVoice === v.id ? "1px solid rgba(0,120,212,0.3)" : "1px solid rgba(255,255,255,0.04)",
+                          borderRadius: 6, padding: "5px 9px", fontSize: 10, textAlign: "left",
+                        }}>{v.name}</button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
 
-                <div style={{ fontSize: 10, color: "#555", lineHeight: 1.5 }}>
-                  Microsoft Edge TTSを使用。無料・APIキー不要・高品質な日本語音声。
+                <div style={{ fontSize: 10, color: "#555", lineHeight: 1.5, marginTop: 4 }}>
+                  Microsoft Edge TTSを使用。無料・APIキー不要。日本語・英語・中国語・韓国語に対応。
                 </div>
               </div>
             )}
@@ -2001,7 +2130,7 @@ export default function EarFlow() {
                 >{urlLoading ? "取得中..." : "🌐 取得"}</button>
               </div>
               <div style={{ fontSize: 10, color: "#555", marginTop: 6, lineHeight: 1.5 }}>
-                ニュース記事やブログのURLを入力。本文を自動抽出してキューに追加します。
+                ニュース記事やブログのURLを入力。本文を自動抽出してキューに追加します。英語等の記事は「訳」ボタンで日本語に翻訳できます。
               </div>
             </>
           )}
@@ -2027,6 +2156,10 @@ export default function EarFlow() {
             {queue.map((item, i) => {
               const isActive = i === activeIdx;
               const estTime = formatEstimatedTime(item.charCount, rate);
+              const itemLang = item.lang || "ja";
+              const langColors = { en: "#f59e0b", zh: "#ef4444", ko: "#a78bfa", ja: "#60a5fa" };
+              const langLabels = { en: "EN", zh: "ZH", ko: "KO", ja: "JA" };
+              const canTranslate = itemLang !== "ja" && !item._translating && oaiApiKey;
 
               return (
                 <div key={item.id} style={{
@@ -2039,10 +2172,19 @@ export default function EarFlow() {
                       {/* Meta */}
                       <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 9, color: "#444" }}>#{i + 1}</span>
+                        <span style={{
+                          fontSize: 8, fontWeight: 700, color: langColors[itemLang] || "#888",
+                          background: `${langColors[itemLang] || "#888"}15`,
+                          border: `1px solid ${langColors[itemLang] || "#888"}30`,
+                          borderRadius: 3, padding: "1px 4px",
+                        }}>{langLabels[itemLang] || itemLang.toUpperCase()}</span>
                         <span style={{ fontSize: 9, color: "#444" }}>{item.charCount.toLocaleString()}字</span>
                         {item.pageCount > 0 && <span style={{ fontSize: 9, color: "#555" }}>{item.pageCount}p</span>}
                         {estTime && (
                           <span style={{ fontSize: 9, color: "#50dcb4" }}>🕐 {estTime}</span>
+                        )}
+                        {item.sourceType === "translated" && (
+                          <span style={{ fontSize: 8, color: "#10b981", background: "rgba(16,185,129,0.1)", borderRadius: 3, padding: "1px 4px" }}>翻訳済</span>
                         )}
                       </div>
                       {/* Title */}
@@ -2057,6 +2199,22 @@ export default function EarFlow() {
 
                     {/* Actions */}
                     <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
+                      {canTranslate && (
+                        <button onClick={() => translateItem(i)} title="日本語に翻訳" style={{
+                          width: 34, height: 34, borderRadius: 8,
+                          background: "transparent", border: "1px solid rgba(245,158,11,0.3)",
+                          color: "#f59e0b", fontSize: 11,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}>訳</button>
+                      )}
+                      {item._translating && (
+                        <span style={{
+                          width: 34, height: 34, borderRadius: 8,
+                          background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.2)",
+                          color: "#f59e0b", fontSize: 9,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}>...</span>
+                      )}
                       <button onClick={() => handlePlay(i)} style={{
                         width: 34, height: 34, borderRadius: 8, border: "none",
                         background: isActive ? "#50dcb4" : "#242434",

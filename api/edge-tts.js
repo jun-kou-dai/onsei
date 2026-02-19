@@ -35,6 +35,9 @@ export default function handler(req, res) {
   const ratePercent = Math.round(((rate || 1.0) - 1.0) * 100);
   const rateStr = ratePercent >= 0 ? `+${ratePercent}%` : `${ratePercent}%`;
   const voiceName = voice || "ja-JP-NanamiNeural";
+  // Extract xml:lang from voice name (e.g., "en-US-JennyNeural" → "en-US")
+  const langMatch = voiceName.match(/^([a-z]{2}-[A-Z]{2})/);
+  const xmlLang = langMatch ? langMatch[1] : "ja-JP";
 
   const connId = randomUUID().replaceAll("-", "");
   const gec = computeGEC();
@@ -85,7 +88,7 @@ export default function handler(req, res) {
     ws.send(
       `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
       `X-Timestamp:${new Date().toISOString()}\r\nPath:ssml\r\n\r\n` +
-      `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='ja-JP'>` +
+      `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${xmlLang}'>` +
       `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rateStr}' volume='+0%'>` +
       `${ssmlBody}</prosody></voice></speak>`
     );
