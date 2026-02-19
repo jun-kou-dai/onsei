@@ -2016,12 +2016,17 @@ export default function EarFlow() {
         {queue.length > 0 && (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontSize: 12, color: "#666" }}>キュー {queue.length}件</span>
+              <span style={{ fontSize: 12, color: "#666" }}>キュー {queue.length}件{queue.length > 0 && (() => {
+                const totalChars = queue.reduce((sum, item) => sum + (item.charCount || 0), 0);
+                const est = formatEstimatedTime(totalChars, rate);
+                return est ? <span style={{ color: "#50dcb4", marginLeft: 6 }}>合計 {est}</span> : null;
+              })()}</span>
               <button onClick={() => { handleStop(); setQueue([]); lsSet("session", null); }} style={S.smBtn("transparent", "#555")}>クリア</button>
             </div>
 
             {queue.map((item, i) => {
               const isActive = i === activeIdx;
+              const estTime = formatEstimatedTime(item.charCount, rate);
 
               return (
                 <div key={item.id} style={{
@@ -2036,6 +2041,9 @@ export default function EarFlow() {
                         <span style={{ fontSize: 9, color: "#444" }}>#{i + 1}</span>
                         <span style={{ fontSize: 9, color: "#444" }}>{item.charCount.toLocaleString()}字</span>
                         {item.pageCount > 0 && <span style={{ fontSize: 9, color: "#555" }}>{item.pageCount}p</span>}
+                        {estTime && (
+                          <span style={{ fontSize: 9, color: "#50dcb4" }}>🕐 {estTime}</span>
+                        )}
                       </div>
                       {/* Title */}
                       <div style={{ fontSize: 14, color: "#ddd", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -2081,6 +2089,11 @@ export default function EarFlow() {
             </div>
             <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
               {savedSession.queue.length}件のキュー
+              {(() => {
+                const totalChars = savedSession.queue.reduce((sum, item) => sum + (item.charCount || 0), 0);
+                const est = formatEstimatedTime(totalChars, rate);
+                return est ? <span style={{ color: "#50dcb4" }}> · {est}</span> : null;
+              })()}
               {savedSession.activeIdx >= 0 && savedSession.queue[savedSession.activeIdx] && (
                 <> · 「{savedSession.queue[savedSession.activeIdx].title.slice(0, 25)}」
                   {savedSession.progress > 0 && <> ({savedSession.progress}%)</>}
@@ -2263,6 +2276,20 @@ function TextHighlight({ sentences, highlightIdx }) {
       })}
     </div>
   );
+}
+
+/* --- Estimated Reading Time --- */
+const BASE_CHARS_PER_MIN = 370; // Japanese TTS ~370 chars/min at 1.0x
+
+function formatEstimatedTime(charCount, rate) {
+  if (!charCount || charCount <= 0) return null;
+  const totalMin = Math.round(charCount / (BASE_CHARS_PER_MIN * rate));
+  if (totalMin < 1) return "1分未満";
+  if (totalMin < 60) return `約${totalMin}分`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (m === 0) return `約${h}時間`;
+  return `約${h}時間${m}分`;
 }
 
 /* --- Speed Chips Component --- */
