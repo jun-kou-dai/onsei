@@ -2540,7 +2540,7 @@ export default function EarFlow() {
                 const est = formatEstimatedTime(totalChars, rate);
                 return est ? <span style={{ color: "#50dcb4", marginLeft: 6 }}>合計 {est}</span> : null;
               })()}</span>
-              <button onClick={() => { handleStop(); setQueue([]); lsSet("session", null); }} style={S.smBtn("transparent", "#555")}>クリア</button>
+              <button onClick={() => { if (queue.length <= 1 || window.confirm(`${queue.length}件のアイテムをすべて削除しますか？`)) { handleStop(); setQueue([]); lsSet("session", null); } }} style={S.smBtn("transparent", "#555")}>クリア</button>
             </div>
 
             {queue.map((item, i) => {
