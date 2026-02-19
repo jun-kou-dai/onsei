@@ -1061,7 +1061,7 @@ export default function EarFlow() {
         const _t0 = performance.now();
         try {
           const controller = new AbortController();
-          const raceTimer = setTimeout(() => controller.abort(), 8000);
+          const raceTimer = setTimeout(() => controller.abort(), 20000);
           fetchRes = await fetch("/api/edge-tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1160,7 +1160,7 @@ export default function EarFlow() {
       // 3. Multi-chunk or no MediaSource — parallel fetch, 8s timeout per chunk
       const blobResults = await Promise.all(chunks.map(chunk => {
         const c = new AbortController();
-        const t = setTimeout(() => c.abort(), 8000);
+        const t = setTimeout(() => c.abort(), 20000);
         return fetch("/api/edge-tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
