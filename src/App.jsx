@@ -1143,15 +1143,28 @@ export default function EarFlow() {
     }
   };
 
-  // --- Edge TTS audio preloader (background, client-side WebSocket) ---
+  // --- Edge TTS audio preloader (background, server API) ---
   const preloadEdgeAudio = (itemId, text) => {
     const v = edgeVoiceRef.current;
     const r = currentRateRef.current || 1.0;
     const key = `${itemId}_${v}_${r}`;
     if (audioCacheRef.current.has(key)) return;
-    edgeTTSClient(text, v, r).then(blob => {
-      if (blob && blob.size >= 100) cacheSet(key, blob);
-    }).catch(() => {});
+    (async () => {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 30000);
+        const res = await fetch("/api/edge-tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voice: v, rate: r }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(timer);
+        if (!res.ok) return;
+        const blob = await res.blob();
+        if (blob && blob.size >= 100) cacheSet(key, blob);
+      } catch {}
+    })();
   };
 
   // --- OpenAI TTS audio preloader (background fetch) ---
@@ -1247,7 +1260,7 @@ export default function EarFlow() {
         return;
       }
 
-      // 2. No cache — client-side WebSocket direct to Bing (no server proxy)
+      // 2. No cache — fetch from server API (browser WebSocket blocked by Microsoft)
       flash("音声生成中...");
 
       // Helper: fallback to browser TTS
@@ -1260,70 +1273,33 @@ export default function EarFlow() {
         speakChunk(0, rateVal);
       };
 
-      // Streaming playback via MediaSource (client-side WebSocket)
-      if (window.MediaSource && MediaSource.isTypeSupported("audio/mpeg")) {
-        const _t0 = performance.now();
-        try {
-          const ms = new MediaSource();
-          const msUrl = URL.createObjectURL(ms);
-          if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
-          const audio = new Audio();
-          audioRef.current = audio;
-          audio.src = msUrl;
-          audio.playbackRate = 1.0;
-          audio.volume = 1.0;
-          setupEdgeAudio(audio, msUrl, rateVal);
-
-          let started = false;
-          await new Promise((resolve, reject) => {
-            ms.addEventListener("sourceopen", async () => {
-              try {
-                const sb = ms.addSourceBuffer("audio/mpeg");
-                await edgeTTSClientStream(text, voice, rateVal ?? 1.0, (chunk) => {
-                  if (playIdRef.current !== myPlayId) return;
-                  const appendChunk = () => {
-                    if (sb.updating) {
-                      sb.addEventListener("updateend", appendChunk, { once: true });
-                      return;
-                    }
-                    sb.appendBuffer(chunk);
-                    if (!started) {
-                      started = true;
-                      sb.addEventListener("updateend", () => {
-                        audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
-                      }, { once: true });
-                    }
-                  };
-                  appendChunk();
-                });
-                // Wait for all pending appends to finish
-                if (sb.updating)
-                  await new Promise(r => sb.addEventListener("updateend", r, { once: true }));
-                if (ms.readyState === "open") ms.endOfStream();
-              } catch (err) {
-                try { if (ms.readyState === "open") ms.endOfStream(); } catch {}
-                reject(err);
-                return;
-              }
-              resolve();
-            });
-          });
-          console.log(`[TTS] client-side stream done in ${Math.round(performance.now()-_t0)}ms`);
-        } catch (err) {
-          if (playIdRef.current !== myPlayId) return;
-          console.warn("[TTS] client-side stream failed:", err.message);
-          fallbackToBrowser(`${err.message} (${Math.round(performance.now()-_t0)}ms)`);
-        }
-        return;
-      }
-
-      // Fallback: no MediaSource — get full blob via client-side WebSocket
       try {
-        const blob = await edgeTTSClient(text, voice, rateVal ?? 1.0);
+        const edgeCtrl = new AbortController();
+        const edgeTimer = setTimeout(() => edgeCtrl.abort(), 30000);
+        const res = await fetch("/api/edge-tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voice, rate: rateVal ?? 1.0 }),
+          signal: edgeCtrl.signal,
+        });
+        clearTimeout(edgeTimer);
+
+        if (playIdRef.current !== myPlayId) return;
+
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          let msg = "";
+          try { msg = JSON.parse(errBody)?.error || errBody.slice(0, 100); } catch { msg = errBody.slice(0, 100); }
+          fallbackToBrowser(msg || "サーバーエラー");
+          return;
+        }
+
+        const blob = await res.blob();
         if (playIdRef.current !== myPlayId) return;
         if (blob.size < 100) { fallbackToBrowser("音声データなし"); return; }
+
         const url = URL.createObjectURL(blob);
-        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
         const audio = new Audio(url);
         audioRef.current = audio;
         audio.playbackRate = 1.0;
@@ -1332,7 +1308,8 @@ export default function EarFlow() {
         audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
       } catch (err) {
         if (playIdRef.current !== myPlayId) return;
-        fallbackToBrowser(err.message);
+        if (err.name === "AbortError") fallbackToBrowser("タイムアウト");
+        else fallbackToBrowser(err.message);
       }
     } catch (e) {
       flash("⚠ " + e.message);
