@@ -471,20 +471,7 @@ export default function EarFlow() {
   // Guard: skip edgeVoice useEffect when voice change comes from handlePlay
   const voiceChangeFromPlayRef = useRef(false);
 
-  // --- ElevenLabs state (persisted to localStorage) ---
   const [ttsEngine, setTtsEngineRaw] = useState(() => lsGet("ttsEngine", "edge"));
-  const [elApiKey, setElApiKeyRaw] = useState(() => lsGet("elApiKey", ""));
-  const [elVoiceId, setElVoiceIdRaw] = useState(() => lsGet("elVoiceId", "Xb7hH8MSUJpSbSDYk0k2"));
-  const [elQuota, setElQuota] = useState(null); // { used, limit, remaining, tier }
-  const [elChecking, setElChecking] = useState(false);
-  const [elVoices] = useState([
-    { id: "Xb7hH8MSUJpSbSDYk0k2", name: "Alice（落ち着いた女性）" },
-    { id: "pqHfZKP75CvOlQylNhV4", name: "Bill（落ち着いた男性）" },
-    { id: "nPczCjzI2devNBz1zQrb", name: "Brian（ナレーション男性）" },
-    { id: "EXAVITQu4vr4xnSDxMaL", name: "Sarah（明るい女性）" },
-    { id: "onwK4e9ZLuTAKqWW03F9", name: "Daniel（ニュース男性）" },
-    { id: "JBFqnCBsd6RMkjVDRZzb", name: "George（深い男性）" },
-  ]);
 
   // --- OpenAI TTS state ---
   const [oaiApiKey, setOaiApiKeyRaw] = useState(() => lsGet("oaiApiKey", ""));
@@ -524,8 +511,6 @@ export default function EarFlow() {
 
   // Persist-on-change wrappers
   const setTtsEngine = (v) => { setTtsEngineRaw(v); lsSet("ttsEngine", v); };
-  const setElApiKey = (v) => { setElApiKeyRaw(v); lsSet("elApiKey", v); };
-  const setElVoiceId = (v) => { setElVoiceIdRaw(v); lsSet("elVoiceId", v); };
   const setRate = (v) => { setRateRaw(v); lsSet("rate", v); };
   const setOaiApiKey = (v) => { setOaiApiKeyRaw(v); lsSet("oaiApiKey", v); };
   const setOaiVoice = (v) => { setOaiVoiceRaw(v); lsSet("oaiVoice", v); };
@@ -540,68 +525,6 @@ export default function EarFlow() {
     audioCacheRef.current.clear(); // clear preload cache when voice changes
   };
 
-  // --- ElevenLabs quota check (via server proxy to avoid CORS) ---
-  const checkElQuota = async (key) => {
-    const apiKey = key || elApiKey;
-    if (!apiKey) { setElQuota(null); return null; }
-    setElChecking(true);
-    try {
-      const res = await fetch("/api/el-check", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, voiceId: elVoiceId }),
-      });
-      const data = await res.json();
-      setElChecking(false);
-
-      if (!data.ok) {
-        const st = data.elStatus;
-        let detail = "";
-        try {
-          const parsed = JSON.parse(data.rawBody || "");
-          detail = parsed?.detail?.message || (typeof parsed?.detail === "string" ? parsed.detail : "") || parsed?.message || "";
-        } catch {
-          detail = (data.rawBody || "").slice(0, 300);
-        }
-
-        const bodyHint = (detail + " " + (data.rawBody || "")).toLowerCase();
-        if (bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions")) {
-          const info = { error: null, limited: true, tier: "unknown", used: 0, limit: 0, remaining: -1 };
-          setElQuota(info);
-          return info;
-        }
-        if (st === 401) {
-          setElQuota({ error: "invalid_key", detail, keyPreview: apiKey.slice(0, 6) + "..." });
-          return { error: "invalid_key" };
-        }
-        setElQuota({ error: "api_error", elStatus: st, detail });
-        return { error: "api_error" };
-      }
-
-      const used = data.character_count || 0;
-      const limit = data.character_limit || 0;
-      const remaining = Math.max(0, limit - used);
-      const tier = data.tier || "free";
-      const info = { used, limit, remaining, tier, error: null };
-      setElQuota(info);
-      return info;
-    } catch (e) {
-      setElChecking(false);
-      setElQuota({ error: "network", detail: e.message });
-      return { error: "network" };
-    }
-  };
-
-  // Check quota when API key changes
-  const handleElApiKeyChange = (v) => {
-    const trimmed = v.trim();
-    setElApiKey(trimmed);
-    if (trimmed.length > 10) {
-      checkElQuota(trimmed);
-    } else {
-      setElQuota(null);
-    }
-  };
 
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { activeIdxRef.current = activeIdx; }, [activeIdx]);
@@ -857,157 +780,6 @@ export default function EarFlow() {
     return voices.find(v => v.lang.startsWith("ja") && v.name.toLowerCase().includes("google"))
       || voices.find(v => v.lang.startsWith("ja"))
       || null;
-  };
-
-  // --- ElevenLabs TTS (via server proxy to avoid CORS) ---
-  const elSpeak = async (text, rateVal) => {
-    if (!elApiKey) { flash("⚠ ElevenLabs APIキーが設定されていません。⚙設定から入力してください"); setSpeaking(false); return; }
-
-    const myPlayId = ++playIdRef.current;
-    currentRateRef.current = rateVal ?? 1.0;
-    generatedRateRef.current = 1.0; // ElevenLabs generates at 1x; speed is purely via playbackRate
-
-    try {
-      flash("🔊 音声生成中（" + text.length + "文字）...");
-      setSpeaking(true);
-
-      let res;
-      try {
-        const elCtrl = new AbortController();
-        const elTimer = setTimeout(() => elCtrl.abort(), 55000);
-        res = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            apiKey: elApiKey,
-            voiceId: elVoiceId,
-            text,
-            modelId: "eleven_multilingual_v2",
-            voiceSettings: { stability: 0.5, similarity_boost: 0.75 },
-          }),
-          signal: elCtrl.signal,
-        });
-        clearTimeout(elTimer);
-      } catch (fetchErr) {
-        flash("⚠ ネットワークエラー: サーバーに接続できません");
-        setSpeaking(false);
-        return;
-      }
-
-      if (playIdRef.current !== myPlayId) return;
-
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        let parsed = null;
-        try { parsed = JSON.parse(errBody); } catch {}
-        const detailObj = parsed?.detail;
-        const detailStatus = typeof detailObj === "object" ? (detailObj?.status || detailObj?.detail?.status || "") : "";
-        const detailMsg = typeof detailObj === "object" ? (detailObj?.message || detailObj?.detail?.message || "") : (typeof detailObj === "string" ? detailObj : "");
-        const fallbackMsg = parsed?.error || parsed?.message || errBody.slice(0, 150);
-
-        if (detailStatus === "quota_exceeded") {
-          // Extract remaining/required credits from message if possible
-          const credMatch = (detailMsg || "").match(/(\d[\d,]*)\s*credits?\s*remaining.*?(\d[\d,]*)\s*credits?\s*(?:are\s*)?required/i);
-          if (credMatch) {
-            flash(`⚠ 文字数上限を超えています。残り ${credMatch[1]} クレジット、このテキストには ${credMatch[2]} クレジット必要です。短いテキストで試してください`);
-          } else {
-            flash("⚠ 文字数上限を超えています。短いテキストで試すか、来月のリセットをお待ちください");
-          }
-        } else if (detailStatus === "detected_unusual_activity") {
-          flash("⚠ ElevenLabs無料枠が停止されています（クラウドIPからのアクセス制限）。有料プランにするか、「ブラウザ内蔵」に切り替えてください");
-          // 設定画面のステータスを即座に「停止中」に上書き
-          setElQuota({
-            error: "ban",
-            detail: "Unusual activity detected. Free Tier usage disabled via API.",
-            tier: "free_banned",
-          });
-        } else if (res.status === 401) {
-          const bodyHint = (detailMsg + " " + errBody).toLowerCase();
-          if (bodyHint.includes("missing the permission") || bodyHint.includes("missing_permissions")) {
-            flash("⚠ APIキーに音声生成の権限がありません。ElevenLabsでキーの権限設定を確認してください");
-          } else {
-            flash("⚠ APIキー認証失敗: " + (detailMsg || fallbackMsg || "キーを確認してください"));
-          }
-        } else if (res.status === 429) {
-          flash("⚠ レート制限に達しました。30秒ほど待ってから再試行してください");
-        } else {
-          flash("⚠ ElevenLabs エラー " + res.status + ": " + (detailMsg || fallbackMsg));
-        }
-        setSpeaking(false); return;
-      }
-
-      const blob = await res.blob();
-      if (playIdRef.current !== myPlayId) return;
-
-      if (blob.size < 100) {
-        flash("⚠ 音声データが空です。テキストまたはAPIキーを確認してください");
-        setSpeaking(false); return;
-      }
-
-      const url = URL.createObjectURL(blob);
-
-      // Stop previous audio if any
-      if (audioRef.current) {
-        audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null;
-        audioRef.current.pause();
-        audioRef.current.src = "";
-      }
-
-      const audio = new Audio(url);
-      audioRef.current = audio;
-      audio.playbackRate = rateVal ?? 1.0;
-      audio.volume = 1.0;
-
-      audio.onplay = () => {
-        setSpeaking(true); setPaused(false);
-        flash(""); // clear "generating" message
-        if (seekAfterLoadRef.current > 0) {
-          const target = seekAfterLoadRef.current;
-          seekAfterLoadRef.current = 0;
-          const doSeek = () => { if (audio.duration > 0 && isFinite(audio.duration)) audio.currentTime = (target / 100) * audio.duration; };
-          if (audio.duration > 0 && isFinite(audio.duration)) doSeek();
-          else audio.addEventListener("durationchange", doSeek, { once: true });
-        }
-      };
-
-      audio.onended = () => {
-        setSpeaking(false); setPaused(false); setProgress(100);
-        stopProgress();
-        URL.revokeObjectURL(url);
-        // Update quota after successful playback
-        checkElQuota();
-        // Auto-play next
-        const nextIdx = activeIdxRef.current + 1;
-        const q = queueRef.current;
-        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
-          setActiveIdx(nextIdx);
-          activeIdxRef.current = nextIdx;
-          setupSentences(q[nextIdx].text);
-          const nextText = q[nextIdx].text;
-          if (nextText) elSpeak(nextText, currentRateRef.current);
-        } else {
-          setActiveIdx(-1); activeIdxRef.current = -1;
-          resetHighlight();
-        }
-      };
-
-      audio.onerror = () => {
-        setSpeaking(false); flash("⚠ 音声再生エラー");
-        URL.revokeObjectURL(url);
-      };
-
-      audio.ontimeupdate = () => {
-        if (audio.duration > 0) {
-          setProgress(Math.round((audio.currentTime / audio.duration) * 100));
-          updateHighlightFromAudio(audio.currentTime, audio.duration);
-        }
-      };
-
-      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
-    } catch (e) {
-      flash("⚠ " + e.message);
-      setSpeaking(false);
-    }
   };
 
   // --- OpenAI TTS (streaming via MediaSource for instant playback) ---
@@ -1587,7 +1359,7 @@ export default function EarFlow() {
       saveSessionData(queueRef.current, activeIdxRef.current, prog);
     }
 
-    playIdRef.current++; // Cancel any pending ElevenLabs requests
+    playIdRef.current++;
     seekAfterLoadRef.current = 0;
 
     // Browser TTS
@@ -1596,7 +1368,6 @@ export default function EarFlow() {
     chunkIdxRef.current = 0;
     window.speechSynthesis?.cancel();
 
-    // ElevenLabs Audio
     if (audioRef.current) {
       audioRef.current.onended = null;
       audioRef.current.onerror = null;
@@ -1701,7 +1472,7 @@ export default function EarFlow() {
       setProgress(100);
       stopKeepAlive();
       stopProgress();
-      // Auto-play next queue item (match behavior of Edge/OpenAI/ElevenLabs)
+      // Auto-play next queue item
       const nextIdx = activeIdxRef.current + 1;
       const q = queueRef.current;
       if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
@@ -1820,8 +1591,6 @@ export default function EarFlow() {
         if (nextIdx < q.length && q[nextIdx]?.status === "ready")
           preloadOpenaiAudio(q[nextIdx].id, q[nextIdx].text);
         openaiSpeak(fullText, rate);
-      } else if (ttsEngine === "elevenlabs") {
-        elSpeak(fullText, rate);
       } else if (ttsEngine === "gemini") {
         geminiSpeak(fullText, rate);
       } else {
@@ -2180,8 +1949,8 @@ export default function EarFlow() {
             <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #50dcb4, #3a9ed8)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>🎧</div>
             <div>
               <div style={{ fontSize: 18, fontWeight: 700, color: "#50dcb4" }}>EarFlow</div>
-              <div style={{ fontSize: 9, color: ttsEngine === "elevenlabs" ? "#a78bfa" : "#555" }}>
-                {ttsEngine === "elevenlabs" ? "✨ ElevenLabs" : "目が塞がっていても、脳は空いている。"}
+              <div style={{ fontSize: 9, color: "#555" }}>
+                目が塞がっていても、脳は空いている。
               </div>
             </div>
           </div>
@@ -2208,74 +1977,6 @@ export default function EarFlow() {
               padding: "14px 32px", fontSize: 16,
             }}>
               🔊 音声テスト
-            </button>
-          </div>
-        )}
-
-        {ttsEngine === "elevenlabs" && elApiKey && !audioTested && (
-          <div style={{ ...S.card, padding: 20, marginBottom: 16, textAlign: "center", borderColor: "rgba(139,92,246,0.2)" }}>
-            <div style={{ fontSize: 14, color: "#bbb", marginBottom: 12 }}>
-              ElevenLabsの音声をテストしてください
-            </div>
-            <button onClick={async () => {
-              setAudioTested(true);
-              try {
-                await elSpeak("こんにちは。ElevenLabsの音声テストです。聞こえますか？", 1.0);
-              } catch {
-                setAudioWorks(false);
-              }
-            }} style={{
-              ...S.btn("#8b5cf6", "#fff"),
-              padding: "14px 32px", fontSize: 16,
-            }}>
-              ✨ ElevenLabs テスト
-            </button>
-          </div>
-        )}
-
-        {ttsEngine === "elevenlabs" && !elApiKey && (
-          <div style={{ ...S.card, padding: 16, marginBottom: 16, borderColor: "rgba(232,100,100,0.2)" }}>
-            <div style={{ fontSize: 13, color: "#e08080", marginBottom: 8 }}>
-              ⚠ まず⚙設定からElevenLabsのAPIキーを入力してください
-            </div>
-            <button onClick={() => setShowSettings(true)} style={{
-              ...S.smBtn("rgba(139,92,246,0.15)", "#c4b5fd"),
-              border: "1px solid rgba(139,92,246,0.2)",
-            }}>⚙ 設定を開く</button>
-          </div>
-        )}
-
-        {ttsEngine === "elevenlabs" && !speaking && (status.includes("無料枠") || status.includes("期限切れ")) && (
-          <div style={{ ...S.card, padding: 16, marginBottom: 16, borderColor: "rgba(232,100,100,0.2)" }}>
-            <div style={{ fontSize: 13, color: "#e08080", marginBottom: 8, fontWeight: 600 }}>
-              ⚠ ElevenLabs 利用制限
-            </div>
-            <div style={{ fontSize: 12, color: "#999", lineHeight: 1.7, marginBottom: 10 }}>
-              無料枠（月10,000文字）を使い切った可能性があります。<br />
-              <b>対処法：</b><br />
-              ・来月のリセットを待つ<br />
-              ・ElevenLabsで有料プランにアップグレード<br />
-              ・「ブラウザ内蔵」に切り替えて使用する
-            </div>
-            <button onClick={() => { setTtsEngine("browser"); setAudioTested(false); setAudioWorks(null); flash("ブラウザ内蔵に切り替えました"); }}
-              style={{ ...S.smBtn("#50dcb4", "#111"), marginTop: 4 }}>
-              🔊 ブラウザ内蔵に切り替え
-            </button>
-          </div>
-        )}
-
-        {ttsEngine === "elevenlabs" && audioTested && !speaking && status.includes("ネットワーク") && (
-          <div style={{ ...S.card, padding: 16, marginBottom: 16, borderColor: "rgba(232,100,100,0.2)" }}>
-            <div style={{ fontSize: 13, color: "#e08080", marginBottom: 8, fontWeight: 600 }}>
-              ⚠ ElevenLabs に接続できません
-            </div>
-            <div style={{ fontSize: 12, color: "#999", lineHeight: 1.7 }}>
-              ネットワークエラーが発生しました。APIキーを確認してください。<br /><br />
-              <b>対処法：</b> ⚙設定で「🔊 ブラウザ内蔵」に切り替えるか、ElevenLabsのAPIキーを確認してください。
-            </div>
-            <button onClick={() => { setTtsEngine("browser"); setAudioTested(false); setAudioWorks(null); flash("ブラウザ内蔵に切り替えました"); }}
-              style={{ ...S.smBtn("#50dcb4", "#111"), marginTop: 10 }}>
-              🔊 ブラウザ内蔵に切り替え
             </button>
           </div>
         )}
@@ -2315,7 +2016,7 @@ export default function EarFlow() {
             {/* TTS Engine */}
             <div style={{ fontSize: 12, color: "#aaa", marginBottom: 6 }}>音声エンジン</div>
             <div style={{ display: "flex", gap: 4, marginBottom: 12, flexWrap: "wrap" }}>
-              {[["edge", "Edge（推奨・無料）", "#0078d4"], ["gemini", "Gemini", "#4285f4"], ["openai", "OpenAI", "#10a37f"], ["elevenlabs", "ElevenLabs", "#8b5cf6"], ["browser", "ブラウザ内蔵", "#50dcb4"]].map(([k, l, clr]) => (
+              {[["edge", "Edge（推奨・無料）", "#0078d4"], ["gemini", "Gemini", "#4285f4"], ["openai", "OpenAI", "#10a37f"], ["browser", "ブラウザ内蔵", "#50dcb4"]].map(([k, l, clr]) => (
                 <button key={k} onClick={() => { setTtsEngine(k); setAudioTested(false); setAudioWorks(null); }} style={{
                   background: ttsEngine === k ? clr : "rgba(255,255,255,0.04)",
                   color: ttsEngine === k ? "#fff" : "#666",
@@ -2459,109 +2160,6 @@ export default function EarFlow() {
               </div>
             )}
 
-            {/* ElevenLabs settings */}
-            {ttsEngine === "elevenlabs" && (
-              <div style={{ background: "rgba(139,92,246,0.05)", borderRadius: 10, padding: 12, marginBottom: 12, border: "1px solid rgba(139,92,246,0.15)" }}>
-                <div style={{ fontSize: 11, color: "#a78bfa", marginBottom: 8, fontWeight: 600 }}>ElevenLabs 設定</div>
-
-                {/* API Key */}
-                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>APIキー</div>
-                <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
-                  <input
-                    type="password"
-                    value={elApiKey}
-                    onChange={e => handleElApiKeyChange(e.target.value)}
-                    placeholder="sk_xxxxxxxxxxxx..."
-                    style={{
-                      flex: 1, background: "#12121c", border: "1px solid rgba(255,255,255,0.08)",
-                      borderRadius: 8, color: "#ddd", padding: "8px 10px", fontSize: 12,
-                    }}
-                  />
-                  <button
-                    onClick={() => checkElQuota()}
-                    disabled={!elApiKey || elChecking}
-                    style={{
-                      background: elApiKey ? "rgba(139,92,246,0.15)" : "rgba(255,255,255,0.02)",
-                      color: elApiKey ? "#c4b5fd" : "#444",
-                      border: "1px solid rgba(139,92,246,0.2)", borderRadius: 8,
-                      padding: "8px 10px", fontSize: 11, whiteSpace: "nowrap",
-                    }}
-                  >{elChecking ? "確認中..." : "キー確認"}</button>
-                </div>
-
-                {/* Quota display */}
-                {elQuota && !elQuota.error && (
-                  <div style={{
-                    fontSize: 11, padding: "6px 8px", borderRadius: 6, marginBottom: 8,
-                    background: (elQuota.limited || elQuota.remaining > 500) ? "rgba(80,220,180,0.06)" : "rgba(232,100,100,0.08)",
-                    color: (elQuota.limited || elQuota.remaining > 500) ? "#50dcb4" : "#e08080",
-                    lineHeight: 1.6,
-                  }}>
-                    {elQuota.limited
-                      ? <>✓ キー有効</>
-                      : <>
-                        ✓ キー有効（{elQuota.tier}）
-                        — 残り <b>{elQuota.remaining.toLocaleString()}</b>文字
-                        （{elQuota.used.toLocaleString()} / {elQuota.limit.toLocaleString()} 使用済み）
-                        {elQuota.remaining <= 0 && <><br />⚠ 無料枠を使い切りました。来月リセットされます。</>}
-                        {elQuota.remaining > 0 && elQuota.remaining <= 1000 && <><br />⚠ 残りわずかです。短いテキストで試してください</>}
-                      </>
-                    }
-                  </div>
-                )}
-                {elQuota?.error === "ban" && (
-                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
-                    ⛔ ElevenLabs無料枠が停止されています<br />
-                    <span style={{ color: "#c4b5fd" }}>対処法：有料プランにするか「ブラウザ内蔵」に切り替えてください</span>
-                  </div>
-                )}
-                {elQuota?.error === "invalid_key" && (
-                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
-                    ✕ APIキーが無効です（401 Unauthorized）<br />
-                    {elQuota.keyPreview && <span style={{ color: "#888" }}>入力されたキー先頭: <code style={{ background: "#1a1a26", padding: "1px 4px", borderRadius: 3 }}>{elQuota.keyPreview}</code><br /></span>}
-                    {elQuota.detail && <span style={{ color: "#888" }}>API応答: {elQuota.detail}<br /></span>}
-                    <span style={{ color: "#c4b5fd" }}>確認事項：キーをコピーし直して、先頭や末尾に余分なスペースがないか確認してください</span>
-                  </div>
-                )}
-                {elQuota?.error === "network" && (
-                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
-                    ✕ ネットワークエラー<br />
-                    {elQuota.detail && <span style={{ color: "#888" }}>詳細: {elQuota.detail}</span>}
-                  </div>
-                )}
-                {elQuota?.error === "api_error" && (
-                  <div style={{ fontSize: 11, color: "#e08080", padding: "6px 8px", borderRadius: 6, marginBottom: 8, background: "rgba(232,100,100,0.08)", lineHeight: 1.7 }}>
-                    ✕ APIエラー（ステータス: {elQuota.elStatus}）<br />
-                    {elQuota.detail && <span style={{ color: "#888" }}>API応答: {elQuota.detail}<br /></span>}
-                    {elQuota.rawBody && !elQuota.detail && <span style={{ color: "#888" }}>生レスポンス: {elQuota.rawBody}<br /></span>}
-                  </div>
-                )}
-
-                <div style={{ fontSize: 10, color: "#555", marginBottom: 10, lineHeight: 1.5 }}>
-                  elevenlabs.io → Profile + API key → API Keys で取得。無料枠: 月10,000文字
-                </div>
-
-                {/* Voice */}
-                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>音声</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                  {elVoices.map(v => (
-                    <button key={v.id} onClick={() => setElVoiceId(v.id)} style={{
-                      background: elVoiceId === v.id ? "rgba(139,92,246,0.15)" : "transparent",
-                      color: elVoiceId === v.id ? "#c4b5fd" : "#666",
-                      border: elVoiceId === v.id ? "1px solid rgba(139,92,246,0.3)" : "1px solid rgba(255,255,255,0.04)",
-                      borderRadius: 6, padding: "6px 10px", fontSize: 11, textAlign: "left",
-                    }}>{v.name}</button>
-                  ))}
-                </div>
-
-                {!elApiKey && (
-                  <div style={{ fontSize: 11, color: "#e08080", marginTop: 8 }}>
-                    ⚠ APIキーを入力してください
-                  </div>
-                )}
-              </div>
-            )}
-
             <div style={{ fontSize: 12, color: "#aaa", marginBottom: 8 }}>速度</div>
             <SpeedChips rate={rate} onChange={handleSpeed} />
 
@@ -2583,11 +2181,6 @@ export default function EarFlow() {
             {ttsEngine === "openai" && (
               <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
                 OpenAI TTS。高品質な日本語音声。速度変更は再生中にも可能です。
-              </div>
-            )}
-            {ttsEngine === "elevenlabs" && (
-              <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
-                ElevenLabsのAI音声を使用。速度変更は再生中にも可能です。
               </div>
             )}
           </div>
@@ -2903,8 +2496,8 @@ export default function EarFlow() {
                 <div style={{ fontSize: 12, fontWeight: 600, color: "#ddd", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {activeIdx >= 0 && queue[activeIdx] ? queue[activeIdx].title : "再生中"}
                 </div>
-                <div style={{ fontSize: 10, color: ttsEngine === "elevenlabs" ? "#a78bfa" : "#555" }}>
-                  {paused ? "一時停止" : "再生中"} · {rate}x{ttsEngine === "elevenlabs" ? " · ElevenLabs" : ttsEngine === "gemini" ? " · Gemini" : ""}
+                <div style={{ fontSize: 10, color: "#555" }}>
+                  {paused ? "一時停止" : "再生中"} · {rate}x{ttsEngine === "gemini" ? " · Gemini" : ""}
                 </div>
               </div>
 

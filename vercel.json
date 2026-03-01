@@ -7,9 +7,6 @@
     "api/edge-tts.js": {
       "maxDuration": 30
     },
-    "api/tts.js": {
-      "maxDuration": 60
-    },
     "api/openai-tts.js": {
       "maxDuration": 60
     },
