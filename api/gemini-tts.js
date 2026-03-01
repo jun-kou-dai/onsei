@@ -41,7 +41,7 @@ export default async function handler(req, res) {
     const timer = setTimeout(() => controller.abort(), 55000);
 
     const gemRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-tts:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent`,
       {
         method: "POST",
         headers: {
