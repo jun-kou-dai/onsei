@@ -18,6 +18,9 @@
     },
     "api/extract-url.js": {
       "maxDuration": 30
+    },
+    "api/gemini-tts.js": {
+      "maxDuration": 60
     }
   }
 }

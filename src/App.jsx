@@ -491,6 +491,10 @@ export default function EarFlow() {
   const [oaiVoice, setOaiVoiceRaw] = useState(() => lsGet("oaiVoice", "nova"));
   const [oaiModel, setOaiModelRaw] = useState(() => lsGet("oaiModel", "tts-1"));
 
+  // --- Gemini TTS state ---
+  const [gemApiKey, setGemApiKeyRaw] = useState(() => lsGet("gemApiKey", ""));
+  const [gemVoice, setGemVoiceRaw] = useState(() => lsGet("gemVoice", "Kore"));
+
   // --- Edge TTS state ---
   const [edgeVoice, setEdgeVoiceRaw] = useState(() => {
     const saved = lsGet("edgeVoice", "ja-JP-NanamiNeural");
@@ -526,6 +530,8 @@ export default function EarFlow() {
   const setOaiApiKey = (v) => { setOaiApiKeyRaw(v); lsSet("oaiApiKey", v); };
   const setOaiVoice = (v) => { setOaiVoiceRaw(v); lsSet("oaiVoice", v); };
   const setOaiModel = (v) => { setOaiModelRaw(v); lsSet("oaiModel", v); };
+  const setGemApiKey = (v) => { setGemApiKeyRaw(v); lsSet("gemApiKey", v); };
+  const setGemVoice = (v) => { setGemVoiceRaw(v); lsSet("gemVoice", v); };
   const setShowTranscript = (v) => { setShowTranscriptRaw(v); lsSet("showTranscript", v); };
   const edgeVoiceRef = useRef(edgeVoice);
   const setEdgeVoice = (v) => {
@@ -1279,6 +1285,92 @@ export default function EarFlow() {
     }
   };
 
+  // --- Gemini TTS (full buffer via server proxy, WAV playback) ---
+  const geminiSpeak = async (text, rateVal) => {
+    if (!gemApiKey) { flash("⚠ Gemini APIキーが設定されていません。設定から入力してください"); setSpeaking(false); return; }
+    const myPlayId = ++playIdRef.current;
+    currentRateRef.current = rateVal ?? 1.0;
+    generatedRateRef.current = 1.0;
+    setSpeaking(true);
+    flash("音声生成中...");
+
+    const chunks = splitTextSmart(text, 4000);
+    const blobs = [];
+
+    try {
+      for (const chunk of chunks) {
+        if (playIdRef.current !== myPlayId) return;
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 55000);
+        const res = await fetch("/api/gemini-tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey: gemApiKey, text: chunk, voice: gemVoice }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(timer);
+
+        if (playIdRef.current !== myPlayId) return;
+
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          let msg = "";
+          try {
+            const parsed = JSON.parse(errBody);
+            msg = parsed?.detail?.error?.message || parsed?.error || errBody.slice(0, 150);
+          } catch { msg = errBody.slice(0, 150); }
+          if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
+          if (res.status === 429) throw new Error("ratelimit");
+          throw new Error(msg || "Gemini TTS failed");
+        }
+
+        const blob = await res.blob();
+        blobs.push(blob);
+      }
+
+      if (playIdRef.current !== myPlayId) return;
+
+      const combined = new Blob(blobs, { type: "audio/wav" });
+      const url = URL.createObjectURL(combined);
+
+      if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.playbackRate = rateVal ?? 1.0;
+      audio.volume = 1.0;
+
+      audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
+      audio.onended = () => {
+        setSpeaking(false); setPaused(false); setProgress(100);
+        stopProgress(); URL.revokeObjectURL(url);
+        const nextIdx = activeIdxRef.current + 1;
+        const q = queueRef.current;
+        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
+          setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
+          setupSentences(q[nextIdx].text);
+          geminiSpeak(q[nextIdx].text, currentRateRef.current);
+        } else {
+          setActiveIdx(-1); activeIdxRef.current = -1; resetHighlight();
+        }
+      };
+      audio.onerror = () => { setSpeaking(false); flash("⚠ 音声再生エラー"); URL.revokeObjectURL(url); };
+      audio.ontimeupdate = () => {
+        if (audio.duration > 0) {
+          setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+          updateHighlightFromAudio(audio.currentTime, audio.duration);
+        }
+      };
+
+      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+    } catch (e) {
+      if (playIdRef.current !== myPlayId) return;
+      if (e.message === "auth") flash("⚠ Gemini APIキーが無効です。キーを確認してください");
+      else if (e.message === "ratelimit") flash("⚠ レート制限中です。少し待ってから再試行してください");
+      else flash("⚠ " + e.message);
+      setSpeaking(false);
+    }
+  };
+
   // --- Edge TTS audio preloader (background, client-side WebSocket) ---
   const preloadEdgeAudio = (itemId, text) => {
     const v = edgeVoiceRef.current;
@@ -1730,6 +1822,8 @@ export default function EarFlow() {
         openaiSpeak(fullText, rate);
       } else if (ttsEngine === "elevenlabs") {
         elSpeak(fullText, rate);
+      } else if (ttsEngine === "gemini") {
+        geminiSpeak(fullText, rate);
       } else {
         // Small delay after cancel() to avoid Chrome speechSynthesis hang
         setTimeout(() => {
@@ -2221,7 +2315,7 @@ export default function EarFlow() {
             {/* TTS Engine */}
             <div style={{ fontSize: 12, color: "#aaa", marginBottom: 6 }}>音声エンジン</div>
             <div style={{ display: "flex", gap: 4, marginBottom: 12, flexWrap: "wrap" }}>
-              {[["edge", "Edge（推奨・無料）", "#0078d4"], ["openai", "OpenAI", "#10a37f"], ["elevenlabs", "ElevenLabs", "#8b5cf6"], ["browser", "ブラウザ内蔵", "#50dcb4"]].map(([k, l, clr]) => (
+              {[["edge", "Edge（推奨・無料）", "#0078d4"], ["gemini", "Gemini", "#4285f4"], ["openai", "OpenAI", "#10a37f"], ["elevenlabs", "ElevenLabs", "#8b5cf6"], ["browser", "ブラウザ内蔵", "#50dcb4"]].map(([k, l, clr]) => (
                 <button key={k} onClick={() => { setTtsEngine(k); setAudioTested(false); setAudioWorks(null); }} style={{
                   background: ttsEngine === k ? clr : "rgba(255,255,255,0.04)",
                   color: ttsEngine === k ? "#fff" : "#666",
@@ -2255,6 +2349,51 @@ export default function EarFlow() {
 
                 <div style={{ fontSize: 10, color: "#555", lineHeight: 1.5, marginTop: 4 }}>
                   Microsoft Edge TTSを使用。無料・APIキー不要。日本語・英語・中国語・韓国語に対応。
+                </div>
+              </div>
+            )}
+
+            {/* Gemini settings */}
+            {ttsEngine === "gemini" && (
+              <div style={{ background: "rgba(66,133,244,0.05)", borderRadius: 10, padding: 12, marginBottom: 12, border: "1px solid rgba(66,133,244,0.15)" }}>
+                <div style={{ fontSize: 11, color: "#4285f4", marginBottom: 8, fontWeight: 600 }}>Gemini TTS 設定</div>
+
+                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>APIキー</div>
+                <input
+                  type="password"
+                  value={gemApiKey}
+                  onChange={e => setGemApiKey(e.target.value.trim())}
+                  placeholder="AIza..."
+                  style={{
+                    width: "100%", background: "#12121c", border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 8, color: "#ddd", padding: "8px 10px", fontSize: 12, marginBottom: 8,
+                    boxSizing: "border-box",
+                  }}
+                />
+
+                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>音声</div>
+                <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 8 }}>
+                  {[
+                    ["Kore", "Kore（女性・落ち着いた）"],
+                    ["Puck", "Puck（男性・明るい）"],
+                    ["Charon", "Charon（男性・クリア）"],
+                    ["Fenrir", "Fenrir（男性・ダイナミック）"],
+                    ["Aoede", "Aoede（女性・自然）"],
+                    ["Leda", "Leda（女性・柔らか）"],
+                    ["Orus", "Orus（男性・低音）"],
+                    ["Zephyr", "Zephyr（中性）"],
+                  ].map(([id, label]) => (
+                    <button key={id} onClick={() => setGemVoice(id)} style={{
+                      background: gemVoice === id ? "rgba(66,133,244,0.15)" : "transparent",
+                      color: gemVoice === id ? "#60a5fa" : "#666",
+                      border: gemVoice === id ? "1px solid rgba(66,133,244,0.3)" : "1px solid rgba(255,255,255,0.04)",
+                      borderRadius: 6, padding: "6px 10px", fontSize: 11, textAlign: "left",
+                    }}>{label}</button>
+                  ))}
+                </div>
+
+                <div style={{ fontSize: 10, color: "#555", lineHeight: 1.5 }}>
+                  Google AI StudioのAPIキーで利用できます。高品質なAI音声。
                 </div>
               </div>
             )}
@@ -2434,6 +2573,11 @@ export default function EarFlow() {
             {ttsEngine === "edge" && (
               <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
                 Edge TTS。高品質な日本語AI音声を無料で利用できます。
+              </div>
+            )}
+            {ttsEngine === "gemini" && (
+              <div style={{ fontSize: 11, color: "#555", marginTop: 10 }}>
+                Gemini TTS。Googleの高品質AI音声。多言語対応。
               </div>
             )}
             {ttsEngine === "openai" && (
@@ -2760,7 +2904,7 @@ export default function EarFlow() {
                   {activeIdx >= 0 && queue[activeIdx] ? queue[activeIdx].title : "再生中"}
                 </div>
                 <div style={{ fontSize: 10, color: ttsEngine === "elevenlabs" ? "#a78bfa" : "#555" }}>
-                  {paused ? "一時停止" : "再生中"} · {rate}x{ttsEngine === "elevenlabs" ? " · ElevenLabs" : ""}
+                  {paused ? "一時停止" : "再生中"} · {rate}x{ttsEngine === "elevenlabs" ? " · ElevenLabs" : ttsEngine === "gemini" ? " · Gemini" : ""}
                 </div>
               </div>
 
