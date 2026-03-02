@@ -497,7 +497,7 @@ export default function EarFlow() {
   const progressRef = useRef(null);
   const dragCnt = useRef(0);
   const audioCacheRef = useRef(new Map()); // Preloaded audio: cacheKey → Blob (LRU, max 5)
-  const preloadingKeys = useRef(new Set()); // Keys currently being fetched (prevent duplicate API calls)
+  const preloadingRef = useRef(new Map()); // key → Promise<Blob|null> for in-progress preloads
   const CACHE_MAX = 5;
   const cacheSet = (key, blob) => {
     const cache = audioCacheRef.current;
@@ -1170,6 +1170,8 @@ export default function EarFlow() {
     const activeItem = queueRef.current[activeIdxRef.current];
     const cacheKey = activeItem ? `gem_c0_${activeItem.id}_${gemVoice}` : null;
     const cachedFirstChunk = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
+    // Check if preload is currently in progress (avoid duplicate API call)
+    const pendingPreload = (!cachedFirstChunk && cacheKey) ? preloadingRef.current.get(cacheKey) : null;
 
     // Chunk-based playback (use cached first chunk if available)
     const chunks = splitTextSmart(text, 300);
@@ -1180,7 +1182,7 @@ export default function EarFlow() {
     let waitTimer = null;
     if (!cachedFirstChunk) {
       waitTimer = setInterval(() => { elapsed++; flash(`🔄 音声生成中... ${elapsed}秒`); }, 1000);
-      flash("🔄 音声生成中... 0秒");
+      flash(pendingPreload ? "🔄 プリロード完了待ち..." : "🔄 音声生成中... 0秒");
     }
 
     try {
@@ -1248,11 +1250,18 @@ export default function EarFlow() {
         audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
       };
 
-      // First chunk: use cache if available, otherwise fetch (~5 sec)
+      // First chunk: use cache → await pending preload → fetch new
       let firstBlob;
       if (cachedFirstChunk) {
         audioCacheRef.current.delete(cacheKey);
         firstBlob = cachedFirstChunk;
+      } else if (pendingPreload) {
+        // Preload is in progress — wait for it instead of making duplicate API call
+        firstBlob = await pendingPreload;
+        if (!firstBlob) {
+          // Preload failed, fetch fresh
+          firstBlob = await geminiTTSFetch(chunks[0], gemApiKey, gemVoice);
+        }
       } else {
         firstBlob = await geminiTTSFetch(chunks[0], gemApiKey, gemVoice);
       }
@@ -1286,15 +1295,16 @@ export default function EarFlow() {
     if (!gemApiKey) return;
     const key = `gem_c0_${itemId}_${gemVoice}`;
     if (audioCacheRef.current.has(key)) return;
-    if (preloadingKeys.current.has(key)) return; // already fetching
+    if (preloadingRef.current.has(key)) return; // already fetching
     const firstChunk = splitTextSmart(text, 300)[0];
     if (!firstChunk) return;
-    preloadingKeys.current.add(key);
-    geminiTTSFetch(firstChunk, gemApiKey, gemVoice).then(blob => {
-      if (blob && blob.size >= 100) cacheSet(key, blob);
-    }).catch(() => {}).finally(() => {
-      preloadingKeys.current.delete(key);
+    const promise = geminiTTSFetch(firstChunk, gemApiKey, gemVoice).then(blob => {
+      if (blob && blob.size >= 100) { cacheSet(key, blob); return blob; }
+      return null;
+    }).catch(() => null).finally(() => {
+      preloadingRef.current.delete(key);
     });
+    preloadingRef.current.set(key, promise);
   };
 
   // --- Edge TTS audio preloader (background, server API) ---
