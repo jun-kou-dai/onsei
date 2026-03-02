@@ -1565,7 +1565,7 @@ export default function EarFlow() {
   const totalCharsRef = useRef(0);
   const spokenCharsRef = useRef(0);
   const stoppedRef = useRef(false);
-  const currentRateRef = useRef(1.0);
+  const currentRateRef = useRef(rate);
   const generatedRateRef = useRef(1.0); // rate baked into SSML for current audio
 
   const splitText = (text) => {
