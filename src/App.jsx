@@ -496,8 +496,9 @@ export default function EarFlow() {
   const keepAliveRef = useRef(null);
   const progressRef = useRef(null);
   const dragCnt = useRef(0);
-  const audioCacheRef = useRef(new Map()); // Preloaded audio: cacheKey → Blob (LRU, max 3)
-  const CACHE_MAX = 3;
+  const audioCacheRef = useRef(new Map()); // Preloaded audio: cacheKey → Blob (LRU, max 5)
+  const preloadingKeys = useRef(new Set()); // Keys currently being fetched (prevent duplicate API calls)
+  const CACHE_MAX = 5;
   const cacheSet = (key, blob) => {
     const cache = audioCacheRef.current;
     cache.delete(key); // move to end (most recent)
@@ -621,6 +622,27 @@ export default function EarFlow() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue.length]);
+
+  // Pre-preload Gemini audio when session banner appears (before user clicks resume)
+  useEffect(() => {
+    if (!savedSession || ttsEngine !== "gemini" || !gemApiKey) return;
+    const q = savedSession.queue;
+    const targetIdx = savedSession.activeIdx >= 0 ? savedSession.activeIdx : 0;
+    for (let i = targetIdx; i < Math.min(targetIdx + 2, q.length); i++) {
+      if (q[i]?.status === "ready") preloadGeminiAudio(q[i].id, q[i].text);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedSession, ttsEngine, gemApiKey]);
+
+  // Auto-preload Gemini audio when queue or engine changes
+  useEffect(() => {
+    if (ttsEngine !== "gemini" || !gemApiKey || queue.length === 0) return;
+    const idx = activeIdxRef.current >= 0 ? activeIdxRef.current : 0;
+    for (let i = idx; i < Math.min(idx + 2, queue.length); i++) {
+      if (queue[i]?.status === "ready") preloadGeminiAudio(queue[i].id, queue[i].text);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsEngine, gemApiKey, queue]);
 
   // Auto-save queue changes
   useEffect(() => {
@@ -1264,11 +1286,15 @@ export default function EarFlow() {
     if (!gemApiKey) return;
     const key = `gem_c0_${itemId}_${gemVoice}`;
     if (audioCacheRef.current.has(key)) return;
+    if (preloadingKeys.current.has(key)) return; // already fetching
     const firstChunk = splitTextSmart(text, 300)[0];
     if (!firstChunk) return;
+    preloadingKeys.current.add(key);
     geminiTTSFetch(firstChunk, gemApiKey, gemVoice).then(blob => {
       if (blob && blob.size >= 100) cacheSet(key, blob);
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => {
+      preloadingKeys.current.delete(key);
+    });
   };
 
   // --- Edge TTS audio preloader (background, server API) ---
