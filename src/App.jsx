@@ -455,6 +455,7 @@ export default function EarFlow() {
   const [isDrag, setIsDrag] = useState(false);
   const [audioTested, setAudioTested] = useState(false);
   const [audioWorks, setAudioWorks] = useState(null); // null=untested, true, false
+  const [preloadReady, setPreloadReady] = useState(new Set()); // item IDs with preloaded audio
 
   // --- Highlight state ---
   const [sentences, setSentences] = useState([]);
@@ -511,19 +512,20 @@ export default function EarFlow() {
   };
 
   // Persist-on-change wrappers
-  const setTtsEngine = (v) => { setTtsEngineRaw(v); lsSet("ttsEngine", v); };
+  const setTtsEngine = (v) => { setTtsEngineRaw(v); lsSet("ttsEngine", v); setPreloadReady(new Set()); };
   const setRate = (v) => { setRateRaw(v); lsSet("rate", v); };
   const setOaiApiKey = (v) => { setOaiApiKeyRaw(v); lsSet("oaiApiKey", v); };
   const setOaiVoice = (v) => { setOaiVoiceRaw(v); lsSet("oaiVoice", v); };
   const setOaiModel = (v) => { setOaiModelRaw(v); lsSet("oaiModel", v); };
   const setGemApiKey = (v) => { setGemApiKeyRaw(v); lsSet("gemApiKey", v); };
-  const setGemVoice = (v) => { setGemVoiceRaw(v); lsSet("gemVoice", v); };
+  const setGemVoice = (v) => { setGemVoiceRaw(v); lsSet("gemVoice", v); setPreloadReady(new Set()); };
   const setShowTranscript = (v) => { setShowTranscriptRaw(v); lsSet("showTranscript", v); };
   const edgeVoiceRef = useRef(edgeVoice);
   const setEdgeVoice = (v) => {
     setEdgeVoiceRaw(v); lsSet("edgeVoice", v);
     edgeVoiceRef.current = v;
     audioCacheRef.current.clear(); // clear preload cache when voice changes
+    setPreloadReady(new Set());
   };
 
 
@@ -1294,12 +1296,19 @@ export default function EarFlow() {
   const preloadGeminiAudio = (itemId, text) => {
     if (!gemApiKey) return;
     const key = `gem_c0_${itemId}_${gemVoice}`;
-    if (audioCacheRef.current.has(key)) return;
+    if (audioCacheRef.current.has(key)) {
+      setPreloadReady(s => { const n = new Set(s); n.add(itemId); return n; });
+      return;
+    }
     if (preloadingRef.current.has(key)) return; // already fetching
     const firstChunk = splitTextSmart(text, 300)[0];
     if (!firstChunk) return;
     const promise = geminiTTSFetch(firstChunk, gemApiKey, gemVoice).then(blob => {
-      if (blob && blob.size >= 100) { cacheSet(key, blob); return blob; }
+      if (blob && blob.size >= 100) {
+        cacheSet(key, blob);
+        setPreloadReady(s => { const n = new Set(s); n.add(itemId); return n; });
+        return blob;
+      }
       return null;
     }).catch(() => null).finally(() => {
       preloadingRef.current.delete(key);
@@ -1312,7 +1321,10 @@ export default function EarFlow() {
     const v = edgeVoiceRef.current;
     const r = currentRateRef.current || 1.0;
     const key = `${itemId}_${v}_${r}`;
-    if (audioCacheRef.current.has(key)) return;
+    if (audioCacheRef.current.has(key)) {
+      setPreloadReady(s => { const n = new Set(s); n.add(itemId); return n; });
+      return;
+    }
     (async () => {
       try {
         const ctrl = new AbortController();
@@ -1326,7 +1338,10 @@ export default function EarFlow() {
         clearTimeout(timer);
         if (!res.ok) return;
         const blob = await res.blob();
-        if (blob && blob.size >= 100) cacheSet(key, blob);
+        if (blob && blob.size >= 100) {
+          cacheSet(key, blob);
+          setPreloadReady(s => { const n = new Set(s); n.add(itemId); return n; });
+        }
       } catch {}
     })();
   };
@@ -1335,7 +1350,10 @@ export default function EarFlow() {
   const preloadOpenaiAudio = (itemId, text) => {
     if (!oaiApiKey) return;
     const key = `oai_${itemId}_${oaiVoice}_${oaiModel}`;
-    if (audioCacheRef.current.has(key)) return;
+    if (audioCacheRef.current.has(key)) {
+      setPreloadReady(s => { const n = new Set(s); n.add(itemId); return n; });
+      return;
+    }
     const chunks = splitTextSmart(text, 4096);
     (async () => {
       try {
@@ -1354,7 +1372,10 @@ export default function EarFlow() {
           blobs.push(await res.blob());
         }
         const combined = new Blob(blobs, { type: "audio/mpeg" });
-        if (combined.size >= 100) cacheSet(key, combined);
+        if (combined.size >= 100) {
+          cacheSet(key, combined);
+          setPreloadReady(s => { const n = new Set(s); n.add(itemId); return n; });
+        }
       } catch {}
     })();
   };
@@ -2453,6 +2474,7 @@ export default function EarFlow() {
               const langColors = { en: "#f59e0b", zh: "#ef4444", ko: "#a78bfa", ja: "#60a5fa" };
               const langLabels = { en: "EN", zh: "ZH", ko: "KO", ja: "JA" };
               const canTranslate = itemLang !== "ja" && !item._translating;
+              const isPreloaded = preloadReady.has(item.id);
 
               return (
                 <div key={item.id} style={{
@@ -2478,6 +2500,11 @@ export default function EarFlow() {
                         )}
                         {item.sourceType === "translated" && (
                           <span style={{ fontSize: 8, color: "#10b981", background: "rgba(16,185,129,0.1)", borderRadius: 3, padding: "1px 4px" }}>翻訳済</span>
+                        )}
+                        {ttsEngine !== "browser" && !isActive && (
+                          isPreloaded
+                            ? <span style={{ fontSize: 8, color: "#50dcb4", background: "rgba(80,220,180,0.1)", borderRadius: 3, padding: "1px 4px" }}>⚡ 即再生</span>
+                            : <span style={{ fontSize: 8, color: "#666", background: "rgba(255,255,255,0.03)", borderRadius: 3, padding: "1px 4px" }}>⏳ 準備中</span>
                         )}
                       </div>
                       {/* Title */}
