@@ -1144,49 +1144,24 @@ export default function EarFlow() {
     generatedRateRef.current = 1.0;
     setSpeaking(true);
 
-    // Check preload cache first — instant playback if available
+    // Check preload cache for first chunk — instant playback
     const activeItem = queueRef.current[activeIdxRef.current];
-    const cacheKey = activeItem ? `gem_${activeItem.id}_${gemVoice}` : null;
-    const cached = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
+    const cacheKey = activeItem ? `gem_c0_${activeItem.id}_${gemVoice}` : null;
+    const cachedFirstChunk = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
 
-    if (cached) {
-      audioCacheRef.current.delete(cacheKey);
-      flash("");
-      const url = URL.createObjectURL(cached);
-      if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
-      const audio = new Audio(url);
-      audioRef.current = audio;
-      audio.playbackRate = rateVal ?? 1.0;
-      audio.volume = 1.0;
-      audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
-      audio.onended = () => {
-        setSpeaking(false); setPaused(false); setProgress(100); stopProgress();
-        URL.revokeObjectURL(url);
-        const nextIdx = activeIdxRef.current + 1;
-        const q = queueRef.current;
-        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
-          setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
-          setupSentences(q[nextIdx].text);
-          geminiSpeak(q[nextIdx].text, currentRateRef.current);
-        } else { setActiveIdx(-1); activeIdxRef.current = -1; resetHighlight(); }
-      };
-      audio.onerror = () => { setSpeaking(false); flash("⚠ 音声再生エラー"); URL.revokeObjectURL(url); };
-      audio.ontimeupdate = () => {
-        if (audio.duration > 0) { setProgress(Math.round((audio.currentTime / audio.duration) * 100)); updateHighlightFromAudio(audio.currentTime, audio.duration); }
-      };
-      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
-      return;
+    // Chunk-based playback (use cached first chunk if available)
+    const chunks = splitTextSmart(text, 300);
+    const blobQueue = [];
+    let chunkIdx = 0;
+
+    let elapsed = 0;
+    let waitTimer = null;
+    if (!cachedFirstChunk) {
+      waitTimer = setInterval(() => { elapsed++; flash(`🔄 音声生成中... ${elapsed}秒`); }, 1000);
+      flash("🔄 音声生成中... 0秒");
     }
 
-    // No cache → chunk-based playback (~300 chars each, first chunk plays in ~5 sec)
-    let elapsed = 0;
-    const waitTimer = setInterval(() => { elapsed++; flash(`🔄 音声生成中... ${elapsed}秒`); }, 1000);
-    flash("🔄 音声生成中... 0秒");
-
     try {
-      const chunks = splitTextSmart(text, 300);
-      const blobQueue = [];
-      let chunkIdx = 0;
 
       // Pre-calculate each chunk's start position in the original text
       const chunkStarts = [];
@@ -1228,6 +1203,9 @@ export default function EarFlow() {
             if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
               setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
               setupSentences(q[nextIdx].text);
+              // Preload the item after next for seamless playback
+              if (nextIdx + 1 < q.length && q[nextIdx + 1]?.status === "ready")
+                preloadGeminiAudio(q[nextIdx + 1].id, q[nextIdx + 1].text);
               geminiSpeak(q[nextIdx].text, currentRateRef.current);
             } else {
               setActiveIdx(-1); activeIdxRef.current = -1; resetHighlight();
@@ -1248,9 +1226,15 @@ export default function EarFlow() {
         audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
       };
 
-      // Fetch first chunk — user waits for this (~5 sec for 300 chars)
-      const firstBlob = await geminiTTSFetch(chunks[0], gemApiKey, gemVoice);
-      clearInterval(waitTimer);
+      // First chunk: use cache if available, otherwise fetch (~5 sec)
+      let firstBlob;
+      if (cachedFirstChunk) {
+        audioCacheRef.current.delete(cacheKey);
+        firstBlob = cachedFirstChunk;
+      } else {
+        firstBlob = await geminiTTSFetch(chunks[0], gemApiKey, gemVoice);
+      }
+      if (waitTimer) clearInterval(waitTimer);
       if (playIdRef.current !== myPlayId) return;
       blobQueue[0] = firstBlob;
       playBlob(firstBlob);
@@ -1266,7 +1250,7 @@ export default function EarFlow() {
       })();
 
     } catch (e) {
-      clearInterval(waitTimer);
+      if (waitTimer) clearInterval(waitTimer);
       if (playIdRef.current !== myPlayId) return;
       if (e.message === "auth") flash("⚠ Gemini APIキーが無効です。キーを確認してください");
       else if (e.message === "ratelimit") flash("⚠ レート制限中です。少し待ってから再試行してください");
@@ -1275,12 +1259,14 @@ export default function EarFlow() {
     }
   };
 
-  // --- Gemini TTS audio preloader (background) ---
+  // --- Gemini TTS audio preloader (background, first chunk only for speed) ---
   const preloadGeminiAudio = (itemId, text) => {
     if (!gemApiKey) return;
-    const key = `gem_${itemId}_${gemVoice}`;
+    const key = `gem_c0_${itemId}_${gemVoice}`;
     if (audioCacheRef.current.has(key)) return;
-    geminiTTSFetch(text, gemApiKey, gemVoice).then(blob => {
+    const firstChunk = splitTextSmart(text, 300)[0];
+    if (!firstChunk) return;
+    geminiTTSFetch(firstChunk, gemApiKey, gemVoice).then(blob => {
       if (blob && blob.size >= 100) cacheSet(key, blob);
     }).catch(() => {});
   };
