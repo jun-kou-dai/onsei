@@ -1175,8 +1175,13 @@ export default function EarFlow() {
     // Check if preload is currently in progress (avoid duplicate API call)
     const pendingPreload = (!cachedFirstChunk && cacheKey) ? preloadingRef.current.get(cacheKey) : null;
 
-    // Chunk-based playback (use cached first chunk if available)
-    const chunks = splitTextSmart(text, 300);
+    // Chunk-based playback: small first chunk for fast start, normal for rest
+    const firstSmall = splitTextSmart(text, 150);
+    const firstChunkText = firstSmall[0];
+    const firstEnd = text.indexOf(firstChunkText) + firstChunkText.length;
+    const restText = text.slice(firstEnd).trim();
+    const restChunks = restText.length > 0 ? splitTextSmart(restText, 300) : [];
+    const chunks = [firstChunkText, ...restChunks];
     const blobQueue = [];
     let chunkIdx = 0;
 
@@ -1301,7 +1306,7 @@ export default function EarFlow() {
       return;
     }
     if (preloadingRef.current.has(key)) return; // already fetching
-    const firstChunk = splitTextSmart(text, 300)[0];
+    const firstChunk = splitTextSmart(text, 150)[0];
     if (!firstChunk) return;
     const promise = geminiTTSFetch(firstChunk, gemApiKey, gemVoice).then(blob => {
       if (blob && blob.size >= 100) {
