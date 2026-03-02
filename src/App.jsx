@@ -1107,6 +1107,7 @@ export default function EarFlow() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          systemInstruction: { parts: [{ text: '句読点（。、！？）では自然な間を置き、落ち着いたペースで朗読してください。' }] },
           contents: [{ role: 'user', parts: [{ text: chunkText }] }],
           generationConfig: {
             responseModalities: ['AUDIO'],
@@ -1186,6 +1187,16 @@ export default function EarFlow() {
       const blobQueue = [];
       let chunkIdx = 0;
 
+      // Pre-calculate each chunk's start position in the original text
+      const chunkStarts = [];
+      let searchFrom = 0;
+      for (const chunk of chunks) {
+        const idx = text.indexOf(chunk, searchFrom);
+        chunkStarts.push(idx >= 0 ? idx : searchFrom);
+        searchFrom = (idx >= 0 ? idx : searchFrom) + chunk.length;
+      }
+      const totalTextLen = text.length;
+
       const playBlob = (blob) => {
         if (playIdRef.current !== myPlayId) return;
         const url = URL.createObjectURL(blob);
@@ -1226,11 +1237,10 @@ export default function EarFlow() {
         audio.ontimeupdate = () => {
           if (audio.duration > 0) {
             const chunkProgress = audio.currentTime / audio.duration;
-            const overall = ((chunkIdx + chunkProgress) / chunks.length) * 100;
+            // Use actual position in original text for accurate highlight
+            const charPos = chunkStarts[chunkIdx] + chunkProgress * chunks[chunkIdx].length;
+            const overall = (charPos / totalTextLen) * 100;
             setProgress(Math.round(overall));
-            const prevChars = chunks.slice(0, chunkIdx).reduce((s, c) => s + c.length, 0);
-            const curChunkChars = chunks[chunkIdx].length;
-            const charPos = prevChars + chunkProgress * curChunkChars;
             updateHighlightFromCharPos(charPos);
           }
         };
