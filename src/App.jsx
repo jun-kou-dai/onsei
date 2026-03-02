@@ -1231,7 +1231,11 @@ export default function EarFlow() {
             const chunkProgress = audio.currentTime / audio.duration;
             const overall = ((chunkIdx + chunkProgress) / chunks.length) * 100;
             setProgress(Math.round(overall));
-            updateHighlightFromAudio(audio.currentTime, audio.duration);
+            // Calculate character position for highlight (across all chunks)
+            const prevChars = chunks.slice(0, chunkIdx).reduce((s, c) => s + c.length, 0);
+            const curChunkChars = chunks[chunkIdx].length;
+            const charPos = prevChars + chunkProgress * curChunkChars;
+            updateHighlightFromCharPos(charPos);
           }
         };
         audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
