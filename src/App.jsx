@@ -1107,8 +1107,9 @@ export default function EarFlow() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: '句読点（。、！？）では自然な間を置き、落ち着いたペースで朗読してください。' }] },
-          contents: [{ role: 'user', parts: [{ text: chunkText }] }],
+          contents: [
+            { role: 'user', parts: [{ text: '以下の文章を、句読点で自然な間を置きながら、落ち着いたペースで朗読してください。\n\n' + chunkText }] }
+          ],
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: {
