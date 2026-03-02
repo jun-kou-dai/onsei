@@ -1099,50 +1099,40 @@ export default function EarFlow() {
     return createWavFromPcm(data);
   };
 
-  // Gemini TTS: fetch audio with auto-retry on rate limit
-  const geminiTTSFetch = async (chunkText, apiKey, voice, maxRetries = 3) => {
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: chunkText }] }],
-            generationConfig: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Kore' } }
-              }
+  // Gemini TTS: fetch audio for given text (single call, no retry)
+  const geminiTTSFetch = async (inputText, apiKey, voice) => {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: inputText.slice(0, 4000) }] }],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Kore' } }
             }
-          }),
-        }
-      );
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        const msg = errBody.error?.message || `HTTP ${res.status}`;
-        if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
-        if (res.status === 429) {
-          if (attempt < maxRetries) {
-            const wait = (attempt + 1) * 10000; // 10s, 20s, 30s
-            flash(`⏳ レート制限...${wait/1000}秒後に再試行`);
-            await new Promise(r => setTimeout(r, wait));
-            continue;
           }
-          throw new Error("ratelimit");
-        }
-        throw new Error(`API ${res.status}: ${msg}`);
+        }),
       }
-      const data = await res.json();
-      const parts = data.candidates?.[0]?.content?.parts || [];
-      for (const part of parts) {
-        if (part.inlineData && part.inlineData.data) {
-          const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
-          return ttsResultToBlob(part.inlineData.data, mimeType);
-        }
-      }
-      throw new Error("APIレスポンスに音声データがありません");
+    );
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      const msg = errBody.error?.message || `HTTP ${res.status}`;
+      if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
+      if (res.status === 429) throw new Error("ratelimit");
+      throw new Error(`API ${res.status}: ${msg}`);
     }
+    const data = await res.json();
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    for (const part of parts) {
+      if (part.inlineData && part.inlineData.data) {
+        const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
+        return ttsResultToBlob(part.inlineData.data, mimeType);
+      }
+    }
+    throw new Error("APIレスポンスに音声データがありません");
   };
 
   const geminiSpeak = async (text, rateVal) => {
@@ -1157,10 +1147,11 @@ export default function EarFlow() {
     const cacheKey = activeItem ? `gem_${activeItem.id}_${gemVoice}` : null;
     const cached = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
 
-    if (cached) {
-      audioCacheRef.current.delete(cacheKey);
+    // Helper: play a single audio blob (used for both cached and fresh audio)
+    const playGeminiBlob = (blob) => {
+      if (playIdRef.current !== myPlayId) return;
       flash("");
-      const url = URL.createObjectURL(cached);
+      const url = URL.createObjectURL(blob);
       if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
       const audio = new Audio(url);
       audioRef.current = audio;
@@ -1180,101 +1171,49 @@ export default function EarFlow() {
       };
       audio.onerror = () => { setSpeaking(false); flash("⚠ 音声再生エラー"); URL.revokeObjectURL(url); };
       audio.ontimeupdate = () => {
-        if (audio.duration > 0) { setProgress(Math.round((audio.currentTime / audio.duration) * 100)); updateHighlightFromAudio(audio.currentTime, audio.duration); }
+        if (audio.duration > 0) {
+          setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+          updateHighlightFromAudio(audio.currentTime, audio.duration);
+        }
       };
       audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+    };
+
+    // 1. Cached audio → instant playback
+    if (cached) {
+      audioCacheRef.current.delete(cacheKey);
+      playGeminiBlob(cached);
       return;
     }
 
-    flash("音声生成中...");
-
+    // 2. No cache → single API call for full text (show elapsed time)
+    let elapsed = 0;
+    const timer = setInterval(() => {
+      elapsed++;
+      flash(`🔄 音声生成中... ${elapsed}秒`);
+    }, 1000);
+    flash("🔄 音声生成中... 0秒");
     try {
-      // Split text into ~300 char chunks for faster first-chunk playback
-      const chunks = splitTextSmart(text, 300);
-      const blobQueue = []; // pre-fetched audio blobs
-      let chunkIdx = 0;
-
-      // Helper: play a blob and chain to next
-      const playBlob = (blob) => {
-        if (playIdRef.current !== myPlayId) return;
-        const url = URL.createObjectURL(blob);
-        if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        audio.playbackRate = rateVal ?? 1.0;
-        audio.volume = 1.0;
-
-        audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
-        audio.onended = () => {
-          URL.revokeObjectURL(url);
-          chunkIdx++;
-          if (playIdRef.current !== myPlayId) return;
-          if (chunkIdx < chunks.length) {
-            // Play next chunk
-            if (blobQueue[chunkIdx]) {
-              playBlob(blobQueue[chunkIdx]);
-            } else {
-              // Next chunk not ready yet — fetch and play
-              flash("音声生成中...");
-              geminiTTSFetch(chunks[chunkIdx], gemApiKey, gemVoice).then(b => {
-                if (playIdRef.current === myPlayId) playBlob(b);
-              }).catch(() => { setSpeaking(false); flash("⚠ 音声生成エラー"); });
-            }
-          } else {
-            // All chunks done — move to next queue item
-            setSpeaking(false); setPaused(false); setProgress(100); stopProgress();
-            const nextIdx = activeIdxRef.current + 1;
-            const q = queueRef.current;
-            if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
-              setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
-              setupSentences(q[nextIdx].text);
-              geminiSpeak(q[nextIdx].text, currentRateRef.current);
-            } else {
-              setActiveIdx(-1); activeIdxRef.current = -1; resetHighlight();
-            }
-          }
-        };
-        audio.onerror = () => { setSpeaking(false); flash("⚠ 音声再生エラー"); URL.revokeObjectURL(url); };
-        audio.ontimeupdate = () => {
-          if (audio.duration > 0) {
-            // Calculate overall progress across all chunks
-            const chunkProgress = audio.currentTime / audio.duration;
-            const overall = ((chunkIdx + chunkProgress) / chunks.length) * 100;
-            setProgress(Math.round(overall));
-            // Calculate character position for highlight (across all chunks)
-            const prevChars = chunks.slice(0, chunkIdx).reduce((s, c) => s + c.length, 0);
-            const curChunkChars = chunks[chunkIdx].length;
-            const charPos = prevChars + chunkProgress * curChunkChars;
-            updateHighlightFromCharPos(charPos);
-          }
-        };
-        audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
-      };
-
-      // Fetch first chunk (blocking — user waits for this)
-      const firstBlob = await geminiTTSFetch(chunks[0], gemApiKey, gemVoice);
+      const blob = await geminiTTSFetch(text, gemApiKey, gemVoice);
+      clearInterval(timer);
       if (playIdRef.current !== myPlayId) return;
-      blobQueue[0] = firstBlob;
-
-      // Start playing first chunk immediately
-      playBlob(firstBlob);
-
-      // Prefetch remaining chunks sequentially (avoid rate limits)
-      (async () => {
-        for (let i = 1; i < chunks.length; i++) {
-          if (playIdRef.current !== myPlayId) break;
-          try {
-            blobQueue[i] = await geminiTTSFetch(chunks[i], gemApiKey, gemVoice);
-          } catch {} // errors handled at play time
-        }
-      })();
-
+      playGeminiBlob(blob);
     } catch (e) {
+      clearInterval(timer);
       if (playIdRef.current !== myPlayId) return;
-      if (e.message === "auth") flash("⚠ Gemini APIキーが無効です。キーを確認してください");
-      else if (e.message === "ratelimit") flash("⚠ レート制限中です。少し待ってから再試行してください");
-      else flash("⚠ " + e.message);
-      setSpeaking(false);
+      if (e.message === "auth") {
+        flash("⚠ Gemini APIキーが無効です。キーを確認してください");
+        setSpeaking(false);
+        return;
+      }
+      // 3. Any error (429, network, etc.) → automatic Edge TTS fallback
+      flash("⚡ Gemini→Edge TTSに自動切替中...");
+      try {
+        await edgeSpeak(text, rateVal);
+      } catch {
+        flash("⚠ 音声生成に失敗しました");
+        setSpeaking(false);
+      }
     }
   };
 
