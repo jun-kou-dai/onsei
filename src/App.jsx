@@ -1057,7 +1057,48 @@ export default function EarFlow() {
     }
   };
 
-  // --- Gemini TTS (full buffer via server proxy, WAV playback) ---
+  // --- Gemini TTS (client-side direct API call, based on nano-storybook-v13) ---
+  // PCM (base64) → WAV Blob conversion (client-side, proven working)
+  const createWavFromPcm = (pcmBase64) => {
+    const binaryString = atob(pcmBase64);
+    const pcmData = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      pcmData[i] = binaryString.charCodeAt(i);
+    }
+    const pcmLength = pcmData.length;
+    const wavBuffer = new ArrayBuffer(44 + pcmLength);
+    const view = new DataView(wavBuffer);
+    const writeString = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + pcmLength, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);   // PCM
+    view.setUint16(22, 1, true);   // mono
+    view.setUint32(24, 24000, true); // sample rate
+    view.setUint32(28, 48000, true); // byte rate
+    view.setUint16(32, 2, true);   // block align
+    view.setUint16(34, 16, true);  // bits per sample
+    writeString(36, 'data');
+    view.setUint32(40, pcmLength, true);
+    const wavUint8 = new Uint8Array(wavBuffer);
+    wavUint8.set(pcmData, 44);
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+  };
+
+  // Convert TTS result to audio Blob (handles multiple mimeTypes)
+  const ttsResultToBlob = (data, mimeType) => {
+    if (mimeType.startsWith('audio/wav') || mimeType.startsWith('audio/mpeg') ||
+        mimeType.startsWith('audio/mp3') || mimeType.startsWith('audio/ogg')) {
+      const binaryString = atob(data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+      return new Blob([bytes], { type: mimeType.split(';')[0] });
+    }
+    return createWavFromPcm(data);
+  };
+
   const geminiSpeak = async (text, rateVal) => {
     if (!gemApiKey) { flash("⚠ Gemini APIキーが設定されていません。設定から入力してください"); setSpeaking(false); return; }
     const myPlayId = ++playIdRef.current;
@@ -1066,44 +1107,71 @@ export default function EarFlow() {
     setSpeaking(true);
     flash("音声生成中...");
 
-    const chunks = splitTextSmart(text, 4000);
-    const blobs = [];
+    const TTS_MODELS = ['gemini-2.5-flash-preview-tts', 'gemini-2.5-pro-preview-tts'];
 
     try {
-      for (const chunk of chunks) {
-        if (playIdRef.current !== myPlayId) return;
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 55000);
-        const res = await fetch("/api/gemini-tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apiKey: gemApiKey, text: chunk, voice: gemVoice }),
-          signal: ctrl.signal,
-        });
-        clearTimeout(timer);
-
-        if (playIdRef.current !== myPlayId) return;
-
-        if (!res.ok) {
-          const errBody = await res.text().catch(() => "");
-          let msg = "";
-          try {
-            const parsed = JSON.parse(errBody);
-            msg = parsed?.detail?.error?.message || parsed?.error || errBody.slice(0, 150);
-          } catch { msg = errBody.slice(0, 150); }
-          if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
-          if (res.status === 429) throw new Error("ratelimit");
-          throw new Error(msg || "Gemini TTS failed");
+      // Call Gemini API directly from client (same approach as nano-storybook-v13)
+      const ttsBody = {
+        contents: [{ role: 'user', parts: [{ text }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: gemVoice || 'Kore' }
+            }
+          }
         }
+      };
 
-        const blob = await res.blob();
-        blobs.push(blob);
+      let audioBlob = null;
+
+      for (const model of TTS_MODELS) {
+        if (playIdRef.current !== myPlayId) return;
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 55000);
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${gemApiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(ttsBody),
+              signal: ctrl.signal,
+            }
+          );
+          clearTimeout(timer);
+
+          if (!res.ok) {
+            const errBody = await res.json().catch(() => ({}));
+            const msg = errBody.error?.message || `HTTP ${res.status}`;
+            if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
+            if (res.status === 429) throw new Error("ratelimit");
+            console.warn(`Gemini TTS ${model} failed: ${msg}`);
+            continue; // try next model
+          }
+
+          const data = await res.json();
+          const parts = data.candidates?.[0]?.content?.parts || [];
+          for (const part of parts) {
+            if (part.inlineData && part.inlineData.data) {
+              const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
+              audioBlob = ttsResultToBlob(part.inlineData.data, mimeType);
+              console.log(`✅ Gemini TTS成功: ${model}, mimeType: ${mimeType}, size: ${audioBlob.size}`);
+              break;
+            }
+          }
+          if (audioBlob) break;
+        } catch (e) {
+          if (e.message === "auth" || e.message === "ratelimit") throw e;
+          console.warn(`Gemini TTS ${model} error:`, e.message);
+          continue;
+        }
       }
 
+      if (!audioBlob) throw new Error("全てのGemini TTSモデルが利用できません");
       if (playIdRef.current !== myPlayId) return;
 
-      const combined = new Blob(blobs, { type: "audio/wav" });
-      const url = URL.createObjectURL(combined);
+      const url = URL.createObjectURL(audioBlob);
 
       if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
       const audio = new Audio(url);
