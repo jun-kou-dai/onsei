@@ -1151,12 +1151,18 @@ export default function EarFlow() {
           }
 
           const data = await res.json();
+          console.log('[Gemini TTS] Raw response keys:', JSON.stringify(Object.keys(data)));
+          console.log('[Gemini TTS] candidates:', JSON.stringify(data.candidates?.length));
           const parts = data.candidates?.[0]?.content?.parts || [];
+          console.log('[Gemini TTS] parts count:', parts.length);
           for (const part of parts) {
+            console.log('[Gemini TTS] part keys:', JSON.stringify(Object.keys(part)));
             if (part.inlineData && part.inlineData.data) {
               const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
+              const base64Len = part.inlineData.data.length;
+              console.log(`[Gemini TTS] base64 length: ${base64Len}, mimeType: ${mimeType}`);
               audioBlob = ttsResultToBlob(part.inlineData.data, mimeType);
-              console.log(`✅ Gemini TTS成功: ${model}, mimeType: ${mimeType}, size: ${audioBlob.size}`);
+              console.log(`✅ Gemini TTS成功: ${model}, mimeType: ${mimeType}, blob size: ${audioBlob.size} bytes`);
               break;
             }
           }
@@ -1172,6 +1178,7 @@ export default function EarFlow() {
       if (playIdRef.current !== myPlayId) return;
 
       const url = URL.createObjectURL(audioBlob);
+      console.log(`[Gemini TTS] Audio URL created, blob type: ${audioBlob.type}, size: ${audioBlob.size}`);
 
       if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
       const audio = new Audio(url);
@@ -1179,7 +1186,7 @@ export default function EarFlow() {
       audio.playbackRate = rateVal ?? 1.0;
       audio.volume = 1.0;
 
-      audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
+      audio.onplay = () => { console.log(`[Gemini TTS] ▶ onplay fired, duration: ${audio.duration}, volume: ${audio.volume}`); setSpeaking(true); setPaused(false); flash(""); };
       audio.onended = () => {
         setSpeaking(false); setPaused(false); setProgress(100);
         stopProgress(); URL.revokeObjectURL(url);
