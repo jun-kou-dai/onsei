@@ -1105,7 +1105,7 @@ export default function EarFlow() {
     currentRateRef.current = rateVal ?? 1.0;
     generatedRateRef.current = 1.0;
     setSpeaking(true);
-    flash("Gemini API呼び出し中...");
+    flash("音声生成中...");
 
     try {
       const ttsBody = {
@@ -1120,8 +1120,6 @@ export default function EarFlow() {
         }
       };
 
-      // Use only flash model (no AbortController to avoid abort issues)
-      flash("Gemini API応答待ち...");
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${gemApiKey}`,
         {
@@ -1141,7 +1139,6 @@ export default function EarFlow() {
         throw new Error(`API ${res.status}: ${msg}`);
       }
 
-      flash("API応答OK、音声データ解析中...");
       const data = await res.json();
       const parts = data.candidates?.[0]?.content?.parts || [];
       let audioBlob = null;
@@ -1149,10 +1146,7 @@ export default function EarFlow() {
       for (const part of parts) {
         if (part.inlineData && part.inlineData.data) {
           const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
-          const b64len = part.inlineData.data.length;
-          flash(`音声データ: ${b64len}文字(base64), type=${mimeType}`);
           audioBlob = ttsResultToBlob(part.inlineData.data, mimeType);
-          flash(`WAV変換完了: ${audioBlob.size}bytes, type=${audioBlob.type}`);
           break;
         }
       }
@@ -1167,10 +1161,7 @@ export default function EarFlow() {
       audio.playbackRate = rateVal ?? 1.0;
       audio.volume = 1.0;
 
-      audio.onplay = () => {
-        flash(`再生中: ${audioBlob.size}bytes, ${audio.duration.toFixed(1)}秒`);
-        setSpeaking(true); setPaused(false);
-      };
+      audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
       audio.onended = () => {
         setSpeaking(false); setPaused(false); setProgress(100);
         stopProgress(); URL.revokeObjectURL(url);
