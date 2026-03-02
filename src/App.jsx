@@ -2787,7 +2787,7 @@ function formatEstimatedTime(charCount, rate, lang) {
 function SpeedChips({ rate, onChange, compact }) {
   return (
     <div style={{ display: "flex", gap: compact ? 2 : 4, alignItems: "center" }}>
-      {[0.8, 1.0, 1.15, 1.2, 1.25, 1.3, 1.5, 2.0].map(r => {
+      {[0.8, 1.0, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5, 2.0].map(r => {
         const on = Math.abs(rate - r) < 0.01;
         return (
           <button key={r} onClick={() => onChange(r)} style={{
