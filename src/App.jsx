@@ -1105,12 +1105,9 @@ export default function EarFlow() {
     currentRateRef.current = rateVal ?? 1.0;
     generatedRateRef.current = 1.0;
     setSpeaking(true);
-    flash("音声生成中...");
-
-    const TTS_MODELS = ['gemini-2.5-flash-preview-tts', 'gemini-2.5-pro-preview-tts'];
+    flash("Gemini API呼び出し中...");
 
     try {
-      // Call Gemini API directly from client (same approach as nano-storybook-v13)
       const ttsBody = {
         contents: [{ role: 'user', parts: [{ text }] }],
         generationConfig: {
@@ -1123,70 +1120,57 @@ export default function EarFlow() {
         }
       };
 
+      // Use only flash model (no AbortController to avoid abort issues)
+      flash("Gemini API応答待ち...");
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${gemApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ttsBody),
+        }
+      );
+
+      if (playIdRef.current !== myPlayId) return;
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        const msg = errBody.error?.message || `HTTP ${res.status}`;
+        if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
+        if (res.status === 429) throw new Error("ratelimit");
+        throw new Error(`API ${res.status}: ${msg}`);
+      }
+
+      flash("API応答OK、音声データ解析中...");
+      const data = await res.json();
+      const parts = data.candidates?.[0]?.content?.parts || [];
       let audioBlob = null;
 
-      for (const model of TTS_MODELS) {
-        if (playIdRef.current !== myPlayId) return;
-        try {
-          const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 55000);
-          const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${gemApiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(ttsBody),
-              signal: ctrl.signal,
-            }
-          );
-          clearTimeout(timer);
-
-          if (!res.ok) {
-            const errBody = await res.json().catch(() => ({}));
-            const msg = errBody.error?.message || `HTTP ${res.status}`;
-            if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
-            if (res.status === 429) throw new Error("ratelimit");
-            console.warn(`Gemini TTS ${model} failed: ${msg}`);
-            continue; // try next model
-          }
-
-          const data = await res.json();
-          console.log('[Gemini TTS] Raw response keys:', JSON.stringify(Object.keys(data)));
-          console.log('[Gemini TTS] candidates:', JSON.stringify(data.candidates?.length));
-          const parts = data.candidates?.[0]?.content?.parts || [];
-          console.log('[Gemini TTS] parts count:', parts.length);
-          for (const part of parts) {
-            console.log('[Gemini TTS] part keys:', JSON.stringify(Object.keys(part)));
-            if (part.inlineData && part.inlineData.data) {
-              const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
-              const base64Len = part.inlineData.data.length;
-              console.log(`[Gemini TTS] base64 length: ${base64Len}, mimeType: ${mimeType}`);
-              audioBlob = ttsResultToBlob(part.inlineData.data, mimeType);
-              console.log(`✅ Gemini TTS成功: ${model}, mimeType: ${mimeType}, blob size: ${audioBlob.size} bytes`);
-              break;
-            }
-          }
-          if (audioBlob) break;
-        } catch (e) {
-          if (e.message === "auth" || e.message === "ratelimit") throw e;
-          console.warn(`Gemini TTS ${model} error:`, e.message);
-          continue;
+      for (const part of parts) {
+        if (part.inlineData && part.inlineData.data) {
+          const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
+          const b64len = part.inlineData.data.length;
+          flash(`音声データ: ${b64len}文字(base64), type=${mimeType}`);
+          audioBlob = ttsResultToBlob(part.inlineData.data, mimeType);
+          flash(`WAV変換完了: ${audioBlob.size}bytes, type=${audioBlob.type}`);
+          break;
         }
       }
 
-      if (!audioBlob) throw new Error("全てのGemini TTSモデルが利用できません");
+      if (!audioBlob) throw new Error("APIレスポンスに音声データがありません");
       if (playIdRef.current !== myPlayId) return;
 
       const url = URL.createObjectURL(audioBlob);
-      console.log(`[Gemini TTS] Audio URL created, blob type: ${audioBlob.type}, size: ${audioBlob.size}`);
-
       if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
       const audio = new Audio(url);
       audioRef.current = audio;
       audio.playbackRate = rateVal ?? 1.0;
       audio.volume = 1.0;
 
-      audio.onplay = () => { console.log(`[Gemini TTS] ▶ onplay fired, duration: ${audio.duration}, volume: ${audio.volume}`); setSpeaking(true); setPaused(false); flash(""); };
+      audio.onplay = () => {
+        flash(`再生中: ${audioBlob.size}bytes, ${audio.duration.toFixed(1)}秒`);
+        setSpeaking(true); setPaused(false);
+      };
       audio.onended = () => {
         setSpeaking(false); setPaused(false); setProgress(100);
         stopProgress(); URL.revokeObjectURL(url);
