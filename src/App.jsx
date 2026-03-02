@@ -1099,40 +1099,50 @@ export default function EarFlow() {
     return createWavFromPcm(data);
   };
 
-  // Gemini TTS: fetch audio for a single text chunk
-  const geminiTTSFetch = async (chunkText, apiKey, voice) => {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: chunkText }] }],
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Kore' } }
+  // Gemini TTS: fetch audio with auto-retry on rate limit
+  const geminiTTSFetch = async (chunkText, apiKey, voice, maxRetries = 3) => {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: chunkText }] }],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Kore' } }
+              }
             }
+          }),
+        }
+      );
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        const msg = errBody.error?.message || `HTTP ${res.status}`;
+        if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
+        if (res.status === 429) {
+          if (attempt < maxRetries) {
+            const wait = (attempt + 1) * 10000; // 10s, 20s, 30s
+            flash(`⏳ レート制限...${wait/1000}秒後に再試行`);
+            await new Promise(r => setTimeout(r, wait));
+            continue;
           }
-        }),
+          throw new Error("ratelimit");
+        }
+        throw new Error(`API ${res.status}: ${msg}`);
       }
-    );
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      const msg = errBody.error?.message || `HTTP ${res.status}`;
-      if (res.status === 400 && /api.?key/i.test(msg)) throw new Error("auth");
-      if (res.status === 429) throw new Error("ratelimit");
-      throw new Error(`API ${res.status}: ${msg}`);
-    }
-    const data = await res.json();
-    const parts = data.candidates?.[0]?.content?.parts || [];
-    for (const part of parts) {
-      if (part.inlineData && part.inlineData.data) {
-        const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
-        return ttsResultToBlob(part.inlineData.data, mimeType);
+      const data = await res.json();
+      const parts = data.candidates?.[0]?.content?.parts || [];
+      for (const part of parts) {
+        if (part.inlineData && part.inlineData.data) {
+          const mimeType = part.inlineData.mimeType || 'audio/L16;rate=24000';
+          return ttsResultToBlob(part.inlineData.data, mimeType);
+        }
       }
+      throw new Error("APIレスポンスに音声データがありません");
     }
-    throw new Error("APIレスポンスに音声データがありません");
   };
 
   const geminiSpeak = async (text, rateVal) => {
@@ -1249,13 +1259,15 @@ export default function EarFlow() {
       // Start playing first chunk immediately
       playBlob(firstBlob);
 
-      // Prefetch remaining chunks in background
-      for (let i = 1; i < chunks.length; i++) {
-        if (playIdRef.current !== myPlayId) break;
-        geminiTTSFetch(chunks[i], gemApiKey, gemVoice).then(b => {
-          blobQueue[i] = b;
-        }).catch(() => {}); // errors handled at play time
-      }
+      // Prefetch remaining chunks sequentially (avoid rate limits)
+      (async () => {
+        for (let i = 1; i < chunks.length; i++) {
+          if (playIdRef.current !== myPlayId) break;
+          try {
+            blobQueue[i] = await geminiTTSFetch(chunks[i], gemApiKey, gemVoice);
+          } catch {} // errors handled at play time
+        }
+      })();
 
     } catch (e) {
       if (playIdRef.current !== myPlayId) return;
