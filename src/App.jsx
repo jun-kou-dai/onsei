@@ -1141,6 +1141,41 @@ export default function EarFlow() {
     currentRateRef.current = rateVal ?? 1.0;
     generatedRateRef.current = 1.0;
     setSpeaking(true);
+
+    // Check preload cache first — instant playback if available
+    const activeItem = queueRef.current[activeIdxRef.current];
+    const cacheKey = activeItem ? `gem_${activeItem.id}_${gemVoice}` : null;
+    const cached = cacheKey ? audioCacheRef.current.get(cacheKey) : null;
+
+    if (cached) {
+      audioCacheRef.current.delete(cacheKey);
+      flash("");
+      const url = URL.createObjectURL(cached);
+      if (audioRef.current) { audioRef.current.onended = null; audioRef.current.onerror = null; audioRef.current.ontimeupdate = null; audioRef.current.pause(); audioRef.current.src = ""; }
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.playbackRate = rateVal ?? 1.0;
+      audio.volume = 1.0;
+      audio.onplay = () => { setSpeaking(true); setPaused(false); flash(""); };
+      audio.onended = () => {
+        setSpeaking(false); setPaused(false); setProgress(100); stopProgress();
+        URL.revokeObjectURL(url);
+        const nextIdx = activeIdxRef.current + 1;
+        const q = queueRef.current;
+        if (nextIdx < q.length && q[nextIdx]?.status === "ready") {
+          setActiveIdx(nextIdx); activeIdxRef.current = nextIdx;
+          setupSentences(q[nextIdx].text);
+          geminiSpeak(q[nextIdx].text, currentRateRef.current);
+        } else { setActiveIdx(-1); activeIdxRef.current = -1; resetHighlight(); }
+      };
+      audio.onerror = () => { setSpeaking(false); flash("⚠ 音声再生エラー"); URL.revokeObjectURL(url); };
+      audio.ontimeupdate = () => {
+        if (audio.duration > 0) { setProgress(Math.round((audio.currentTime / audio.duration) * 100)); updateHighlightFromAudio(audio.currentTime, audio.duration); }
+      };
+      audio.play().catch(e => { flash("⚠ 再生失敗: " + e.message); setSpeaking(false); });
+      return;
+    }
+
     flash("音声生成中...");
 
     try {
@@ -1663,6 +1698,11 @@ export default function EarFlow() {
           preloadOpenaiAudio(q[nextIdx].id, q[nextIdx].text);
         openaiSpeak(fullText, rate);
       } else if (ttsEngine === "gemini") {
+        // Preload next item while current plays
+        const nextIdx = index + 1;
+        const q = queueRef.current;
+        if (nextIdx < q.length && q[nextIdx]?.status === "ready")
+          preloadGeminiAudio(q[nextIdx].id, q[nextIdx].text);
         geminiSpeak(fullText, rate);
       } else {
         // Small delay after cancel() to avoid Chrome speechSynthesis hang
@@ -1785,6 +1825,7 @@ export default function EarFlow() {
       setQueue(q => [...q, ...items]);
       if (ttsEngine === "edge" && items[0]) preloadEdgeAudio(items[0].id, items[0].text);
       else if (ttsEngine === "openai" && items[0]) preloadOpenaiAudio(items[0].id, items[0].text);
+      else if (ttsEngine === "gemini" && items[0]) preloadGeminiAudio(items[0].id, items[0].text);
       flash(`✓ ${text.length.toLocaleString()}字 → ${sections.length}パートに分割`);
       return;
     }
@@ -1798,6 +1839,7 @@ export default function EarFlow() {
     }]);
     if (ttsEngine === "edge") preloadEdgeAudio(id, text);
     else if (ttsEngine === "openai") preloadOpenaiAudio(id, text);
+    else if (ttsEngine === "gemini") preloadGeminiAudio(id, text);
   };
 
 
